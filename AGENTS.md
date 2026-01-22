@@ -2,8 +2,6 @@ READ ~/Projects/agent-scripts/AGENTS.MD BEFORE ANYTHING (skip if missing).
 
 # Repository Guidelines
 
-Keep this repo consistent as code and data are added.
-
 ## Project Objective
 Export all Monarch Money account balances into CSV files for downstream analysis and archiving.
 Target output directory: `output/`.
@@ -17,14 +15,6 @@ Target output directory: `output/`.
 - `docs/`: project notes and design docs.
 
 Keep modules small and focused on one responsibility.
-
-## Workspace & Tooling Conventions
-- Preferred workspace: `~/Projects/python/monarch-cli` (keep repos under `~/Projects`).
-- Git remotes: prefer HTTPS for `origin`.
-- Commits: Conventional Commits (`feat|fix|refactor|build|ci|chore|docs|style|perf|test`).
-- Commit helper: use `committer` if available.
-- Deletions: use `trash` instead of `rm` when possible.
-- Avoid `./runner`; use repo scripts or direct CLI commands.
 
 ## Data Output Format
 Exports follow the sample schema `Date,Balance,Account` and are written per account:
@@ -62,17 +52,3 @@ Use `pytest` when adding tests.
 
 ## Authentication & Browser Session
 Use the existing browser session to reuse Monarch cookies. The exporter should attach to an already-authenticated session rather than prompting for login.
-
-## Commit & Pull Request Guidelines
-Use Conventional Commits:
-- `feat: export monarch balances to csv`
-- `fix: handle empty PDF pages`
-
-PRs should include:
-- A short description of changes and motivation.
-- Links to relevant issues or specs (if any).
-- Test evidence (command output or notes).
-
-## Agent-Specific Instructions
-- Keep ASCII-only content unless a file already uses Unicode.
-- Prefer `rg` for searching; avoid destructive Git commands.
