@@ -31,6 +31,7 @@ Key commands:
 - `PYTHONPATH=src python -m monarch_export.export_balances --channel chromium`: run the balances export using the Chromium channel.
 - `PYTHONPATH=src python -m monarch_export.export_balances --channel chromium --skip-existing`: skip accounts that already have exports.
 - `PYTHONPATH=src python -m monarch_export.export_balances --cdp-port 9222`: attach to a running Chrome session with remote debugging.
+- `PYTHONPATH=src python -m monarch_export.combine_balances`: combine all balance exports into `output/all_balances.csv` and write `output/total_balances.png`.
 - `python scripts/validate_balances_csv.py output/Balances_<timestamp>.csv`: validate an export.
 - `python scripts/rename_balance_exports.py`: rename generic exports to include account slugs.
 

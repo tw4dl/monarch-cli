@@ -29,6 +29,10 @@ CATEGORY_CREDIT_CARDS = "Credit Cards"
 CATEGORY_REAL_ESTATE = "Real Estate"
 CATEGORY_LOANS = "Loans"
 CATEGORY_OTHER_ASSETS = "Other Assets"
+EXCLUDED_CATEGORIES = {
+    CATEGORY_CREDIT_CARDS,
+    CATEGORY_OTHER,
+}
 
 
 @dataclass(frozen=True)
@@ -632,16 +636,12 @@ def run_export(config: ExportConfig) -> Path:
             output_paths: list[Path] = []
             errors: list[str] = []
             handled = 0
-            excluded_categories = {
-                CATEGORY_CREDIT_CARDS,
-                CATEGORY_OTHER,
-            }
             for idx, account in enumerate(accounts, start=1):
                 print(
                     f"Exporting {idx}/{len(accounts)}: {account.name}",
                     flush=True,
                 )
-                if account.category in excluded_categories:
+                if account.category in EXCLUDED_CATEGORIES:
                     print(
                         f"Skipping {account.name}; {account.category} balances are excluded.",
                         flush=True,
