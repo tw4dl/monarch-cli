@@ -15,6 +15,9 @@ import matplotlib.pyplot as plt
 from monarch_export.export_balances import EXCLUDED_CATEGORIES
 
 TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}")
+INCLUDED_ACCOUNTS = {
+    "NetWorthAccount",
+}
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
@@ -159,7 +162,7 @@ def run(argv: Optional[Iterable[str]] = None) -> Path:
     accounts: list[str] = []
     account_data: dict[str, dict[dt.date, str]] = {}
     for account, category in account_entries:
-        if category in EXCLUDED_CATEGORIES:
+        if category in EXCLUDED_CATEGORIES and account not in INCLUDED_ACCOUNTS:
             continue
         path = latest_files.get(account)
         if not path:

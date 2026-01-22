@@ -33,6 +33,9 @@ EXCLUDED_CATEGORIES = {
     CATEGORY_CREDIT_CARDS,
     CATEGORY_OTHER,
 }
+INCLUDED_ACCOUNTS = {
+    "NetWorthAccount",
+}
 
 
 @dataclass(frozen=True)
@@ -641,7 +644,10 @@ def run_export(config: ExportConfig) -> Path:
                     f"Exporting {idx}/{len(accounts)}: {account.name}",
                     flush=True,
                 )
-                if account.category in EXCLUDED_CATEGORIES:
+                if (
+                    account.category in EXCLUDED_CATEGORIES
+                    and account.name not in INCLUDED_ACCOUNTS
+                ):
                     print(
                         f"Skipping {account.name}; {account.category} balances are excluded.",
                         flush=True,

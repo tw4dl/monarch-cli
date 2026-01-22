@@ -34,6 +34,7 @@ Key commands:
 - `PYTHONPATH=src python -m monarch_export.combine_balances`: combine all balance exports into `output/all_balances.csv` and write `output/total_balances.png`.
 - `python scripts/validate_balances_csv.py output/Balances_<timestamp>.csv`: validate an export.
 - `python scripts/rename_balance_exports.py`: rename generic exports to include account slugs.
+- `bun scripts/docs-list.ts`: list docs and enforce front matter before doc changes.
 
 Prefer a task runner (e.g., `make`, `just`) for repeatable workflows.
 
