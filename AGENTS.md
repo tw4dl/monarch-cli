@@ -1,3 +1,5 @@
+READ ~/Projects/agent-scripts/AGENTS.MD BEFORE ANYTHING (skip if missing).
+
 # Repository Guidelines
 
 Keep this repo consistent as code and data are added.
