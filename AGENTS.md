@@ -16,6 +16,14 @@ Target output directory: `output/`.
 
 Keep modules small and focused on one responsibility.
 
+## Workspace & Tooling Conventions
+- Preferred workspace: `~/Projects/python/monarch-cli` (keep repos under `~/Projects`).
+- Git remotes: prefer HTTPS for `origin`.
+- Commits: Conventional Commits (`feat|fix|refactor|build|ci|chore|docs|style|perf|test`).
+- Commit helper: use `committer` if available.
+- Deletions: use `trash` instead of `rm` when possible.
+- Avoid `./runner`; use repo scripts or direct CLI commands.
+
 ## Data Output Format
 Exports follow the sample schema `Date,Balance,Account` and are written per account:
 - File naming: `output/Balances_<category>-<account>-<YYYY-MM-DDTHH-MM-SS>.csv`
@@ -41,6 +49,7 @@ Prefer a task runner (e.g., `make`, `just`) for repeatable workflows.
 - Indentation: 4 spaces for Python; no tabs.
 - File names: `snake_case.py` for modules, `test_*.py` for tests.
 - Keep functions short; prefer pure functions for data transforms.
+- Keep files ~500 LOC or less; split when they grow.
 - If you add a formatter/linter (e.g., `ruff`, `black`), include the config at repo root and document the command here.
 
 ## Testing Guidelines
@@ -53,7 +62,7 @@ Use `pytest` when adding tests.
 Use the existing browser session to reuse Monarch cookies. The exporter should attach to an already-authenticated session rather than prompting for login.
 
 ## Commit & Pull Request Guidelines
-There is no Git history yet, so no established convention. Suggested format:
+Use Conventional Commits:
 - `feat: export monarch balances to csv`
 - `fix: handle empty PDF pages`
 
