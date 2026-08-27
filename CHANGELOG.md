@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-27
+
 ### Added
 
 #### Layered Configuration System
@@ -48,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Mutation output schemas** - Account, budget, category, and transaction write commands now accept subcommand-local `--json`/`--format` flags and return normalized envelopes with `status`, `entity`, top-level `id`/`ids`, and `result`.
 
 ### Fixed
+
+- **Install dependencies** - Declared the directly imported `click` package and removed the unsupported `typer[all]` extra so clean `pip`, `pipx`, and `uv tool` installs start successfully.
+- **Repository metadata** - Updated project, documentation, issue, changelog, clone, and release links for `tw4dl/monarch-cli`.
 
 - **Color auto-detection** - `NO_COLOR`, `TERM=dumb`, and non-TTY now properly disable color
   - Previously, color settings bypassed auto-detection, causing ANSI codes in piped output
@@ -123,5 +128,6 @@ Initial release of Monarch CLI - a command-line interface for Monarch Money.
 - No credentials stored after authentication
 - Token refresh handled automatically
 
-[Unreleased]: https://github.com/crcatala/monarch-cli/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/crcatala/monarch-cli/releases/tag/v0.1.0
+[Unreleased]: https://github.com/tw4dl/monarch-cli/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/tw4dl/monarch-cli/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/tw4dl/monarch-cli/releases/tag/v0.1.0
