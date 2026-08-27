@@ -110,7 +110,7 @@ fi
 echo ""
 echo "✅ GitHub release ${VERSION} complete!"
 echo ""
-echo "   View release: https://github.com/crcatala/monarch-cli/releases/tag/${TAG}"
+echo "   View release: https://github.com/tw4dl/monarch-cli/releases/tag/${TAG}"
 echo ""
 echo "⚠️  This script does NOT publish to PyPI. To publish:"
 echo ""
