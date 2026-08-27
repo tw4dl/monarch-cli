@@ -448,7 +448,7 @@ def init_config_file() -> Path:
 
 DEFAULT_CONFIG_TEMPLATE = """\
 # Monarch CLI Configuration
-# https://github.com/crcatala/monarch-cli
+# https://github.com/tw4dl/monarch-cli
 #
 # This file sets default values. They can be overridden by:
 # - Environment variables (MONARCH_*)

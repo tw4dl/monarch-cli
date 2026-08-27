@@ -548,7 +548,7 @@ monarch --debug accounts list
 ### Setup
 
 ```bash
-git clone https://github.com/crcatala/monarch-cli.git
+git clone https://github.com/tw4dl/monarch-cli.git
 cd monarch-cli
 
 # Install with dev dependencies
