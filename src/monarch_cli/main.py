@@ -12,6 +12,7 @@ from monarch_cli.commands import (
     cashflow,
     categories,
     investments,
+    mcp,
     transactions,
 )
 from monarch_cli.core.capabilities import build_capabilities
@@ -34,6 +35,7 @@ app.add_typer(cashflow.app, name="cashflow")
 app.add_typer(categories.app, name="categories")
 app.command("api")(api.api_cmd)
 app.add_typer(investments.app, name="investments")
+app.add_typer(mcp.app, name="mcp")
 
 
 def version_callback(value: bool) -> None:

@@ -42,6 +42,9 @@ dev = [
     "readme-renderer[md]>=44.0",
     "twine>=5.0.0",
 ]
+mcp = [
+    "mcp>=1.27.1,<2.0.0",
+]
 
 [project.scripts]
 monarch = "monarch_cli.main:app"
@@ -75,4 +78,3 @@ asyncio_mode = "auto"
 markers = [
     "live: marks tests that hit the real Monarch Money API (excluded in CI)",
 ]
-

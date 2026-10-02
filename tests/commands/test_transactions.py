@@ -42,6 +42,35 @@ class TestParseDateHelper:
 def mock_authenticated_client() -> MagicMock:
     """Create a mock authenticated client."""
     mock_client = MagicMock()
+
+    async def async_get_transaction_details(
+        transaction_id: str,
+        redirect_posted: bool = True,  # noqa: ARG001
+    ) -> dict:
+        return {
+            "getTransaction": {
+                "id": transaction_id,
+                "amount": -45.67,
+                "date": "2024-01-15",
+                "notes": None,
+                "merchant": {"name": "Coffee Shop"},
+                "category": {"id": "cat_food", "name": "Food & Drink"},
+            }
+        }
+
+    mock_client.get_transaction_details = async_get_transaction_details
+
+    async def async_get_transaction_categories() -> dict:
+        return {
+            "categories": [
+                {"id": "cat_123", "name": "Utilities"},
+                {"id": "cat_food", "name": "Food & Drink"},
+                {"id": "cat_456", "name": "Financial Fees"},
+                {"id": "cat_fx", "name": "FX Conversion"},
+            ]
+        }
+
+    mock_client.get_transaction_categories = async_get_transaction_categories
     return mock_client
 
 
@@ -508,8 +537,10 @@ class TestTransactionsUpdate:
         mock_authenticated_client: MagicMock,
     ) -> None:
         """Update with --category calls API correctly."""
+        update_calls: list[dict] = []
 
-        async def async_update_transaction(**_):
+        async def async_update_transaction(**kwargs):
+            update_calls.append(kwargs)
             return {"success": True}
 
         mock_authenticated_client.update_transaction = async_update_transaction
@@ -527,6 +558,38 @@ class TestTransactionsUpdate:
             output = json.loads(result.stdout)
             assert output["status"] == "updated"
             assert output["changes"]["category_id"] == "cat_456"
+            assert update_calls == [
+                {"transaction_id": "txn_123", "category_id": "cat_456", "amount": -45.67}
+            ]
+
+    def test_update_resolves_category_name_to_id(
+        self,
+        mock_authenticated_client: MagicMock,
+    ) -> None:
+        """Update resolves an exact category name before calling the API."""
+        update_calls: list[dict] = []
+
+        async def async_update_transaction(**kwargs):
+            update_calls.append(kwargs)
+            return {"success": True}
+
+        mock_authenticated_client.update_transaction = async_update_transaction
+
+        with (
+            patch(
+                "monarch_cli.commands.transactions.get_authenticated_client",
+                return_value=mock_authenticated_client,
+            ),
+            patch("monarch_cli.output.progress.is_interactive", return_value=False),
+        ):
+            result = runner.invoke(app, ["update", "txn_123", "--category", "Financial Fees"])
+
+            assert result.exit_code == 0
+            output = json.loads(result.stdout)
+            assert output["changes"]["category_id"] == "cat_456"
+            assert update_calls == [
+                {"transaction_id": "txn_123", "category_id": "cat_456", "amount": -45.67}
+            ]
 
     def test_update_with_notes(
         self,
@@ -552,6 +615,53 @@ class TestTransactionsUpdate:
             output = json.loads(result.stdout)
             assert output["status"] == "updated"
             assert output["changes"]["notes"] == "Business lunch"
+
+    def test_metadata_update_preserves_current_amount(
+        self,
+        mock_authenticated_client: MagicMock,
+    ) -> None:
+        """Metadata-only updates include current amount to avoid upstream amount reverts."""
+        update_calls: list[dict] = []
+
+        async def async_get_transaction_details(
+            transaction_id: str,
+            redirect_posted: bool = True,  # noqa: ARG001
+        ) -> dict:
+            return {
+                "getTransaction": {
+                    "id": transaction_id,
+                    "amount": 42.51,
+                    "date": "2026-06-05",
+                    "notes": "old",
+                    "merchant": {"name": "KRW Custody Fee"},
+                    "category": {"id": "cat_transfer", "name": "Transfer"},
+                }
+            }
+
+        async def async_update_transaction(**kwargs):
+            update_calls.append(kwargs)
+            return {"success": True}
+
+        mock_authenticated_client.get_transaction_details = async_get_transaction_details
+        mock_authenticated_client.update_transaction = async_update_transaction
+
+        with (
+            patch(
+                "monarch_cli.commands.transactions.get_authenticated_client",
+                return_value=mock_authenticated_client,
+            ),
+            patch("monarch_cli.output.progress.is_interactive", return_value=False),
+        ):
+            result = runner.invoke(app, ["update", "txn_123", "--notes", "corrected"])
+
+            assert result.exit_code == 0
+            assert update_calls == [
+                {
+                    "transaction_id": "txn_123",
+                    "notes": "corrected",
+                    "amount": 42.51,
+                }
+            ]
 
     def test_update_with_multiple_changes(
         self,
@@ -1226,6 +1336,7 @@ class TestTransactionsAttach:
                 {
                     "transaction_id": "txn_123",
                     "notes": "Receipt: merchant, $12.34.",
+                    "amount": -45.67,
                 }
             ]
 
@@ -1345,6 +1456,39 @@ class TestTransactionsBatchUpdate:
             ]
             assert len(update_calls) == 2
 
+    def test_batch_update_resolves_category_name_to_id(
+        self,
+        mock_authenticated_client: MagicMock,
+    ) -> None:
+        """Batch update resolves an exact category name before calling the API."""
+        update_calls: list[dict] = []
+
+        async def async_update_transaction(**kwargs):
+            update_calls.append(kwargs)
+            return {"success": True}
+
+        mock_authenticated_client.update_transaction = async_update_transaction
+
+        with (
+            patch(
+                "monarch_cli.commands.transactions.get_authenticated_client",
+                return_value=mock_authenticated_client,
+            ),
+            patch("monarch_cli.output.progress.is_interactive", return_value=False),
+        ):
+            result = runner.invoke(
+                app,
+                ["batch-update", "txn_123", "txn_456", "--category", "FX Conversion", "--json"],
+            )
+
+            assert result.exit_code == 0
+            output = json.loads(result.stdout)
+            assert output["changes"]["category_id"] == "cat_fx"
+            assert update_calls == [
+                {"transaction_id": "txn_123", "category_id": "cat_fx", "amount": -45.67},
+                {"transaction_id": "txn_456", "category_id": "cat_fx", "amount": -45.67},
+            ]
+
     def test_batch_update_with_notes(
         self,
         mock_authenticated_client: MagicMock,
@@ -1372,6 +1516,13 @@ class TestTransactionsBatchUpdate:
             assert output["status"] == "completed"
             assert output["success_count"] == 1
             assert output["changes"]["notes"] == "Q1 Expenses"
+            assert update_calls == [
+                {
+                    "transaction_id": "txn_123",
+                    "notes": "Q1 Expenses",
+                    "amount": -45.67,
+                }
+            ]
 
     def test_batch_update_with_stdin(
         self,
@@ -1435,9 +1586,18 @@ class TestTransactionsBatchUpdate:
             assert output["success_count"] == 2
             assert len(update_calls) == 2
 
-    def test_batch_update_dry_run(self) -> None:
+    def test_batch_update_dry_run(
+        self,
+        mock_authenticated_client: MagicMock,
+    ) -> None:
         """Batch update dry-run shows preview without applying."""
-        with patch("monarch_cli.output.progress.is_interactive", return_value=False):
+        with (
+            patch(
+                "monarch_cli.commands.transactions.get_authenticated_client",
+                return_value=mock_authenticated_client,
+            ),
+            patch("monarch_cli.output.progress.is_interactive", return_value=False),
+        ):
             result = runner.invoke(
                 app,
                 ["batch-update", "txn_123", "txn_456", "--category", "cat_food", "--dry-run"],

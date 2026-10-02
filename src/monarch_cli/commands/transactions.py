@@ -103,6 +103,94 @@ def _unwrap_transaction(raw: Any) -> dict[str, Any]:
     return raw
 
 
+def _extract_amount(raw: Any) -> float | None:
+    """Return a transaction amount from detail/readback response shapes."""
+    amount = _unwrap_transaction(raw).get("amount")
+    if amount is None:
+        return None
+    try:
+        return float(amount)
+    except (TypeError, ValueError):
+        return None
+
+
+def _amounts_match(left: float, right: float) -> bool:
+    """Compare currency amounts at cent precision."""
+    return round(left, 2) == round(right, 2)
+
+
+async def _resolve_category_id(client: Any, category: str) -> str:
+    """Resolve either a category ID or an exact category name to a category ID."""
+    categories_raw = await client.get_transaction_categories()
+    categories = categories_raw.get("categories", [])
+
+    if any(item.get("id") == category for item in categories):
+        return category
+
+    matches = [item for item in categories if item.get("name") == category]
+    if len(matches) == 1 and matches[0].get("id"):
+        return str(matches[0]["id"])
+    if not matches:
+        raise ValueError(
+            f"Unknown category '{category}'. Pass a category ID or exact category name."
+        )
+
+    match_ids = ", ".join(str(item.get("id")) for item in matches if item.get("id"))
+    raise ValueError(
+        f"Category name '{category}' is ambiguous; use a category ID instead. Matches: {match_ids}"
+    )
+
+
+async def _resolve_transaction_changes(client: Any, changes: dict[str, Any]) -> dict[str, Any]:
+    """Resolve CLI-friendly change fields to API-ready values."""
+    resolved = dict(changes)
+    category = resolved.get("category_id")
+    if category is not None:
+        resolved["category_id"] = await _resolve_category_id(client, str(category))
+    return resolved
+
+
+async def _update_transaction_safely(
+    *,
+    client: Any,
+    transaction_id: str,
+    changes: dict[str, Any],
+) -> tuple[Any, dict[str, Any]]:
+    """Update a transaction while preserving verified current amount for metadata writes."""
+    api_changes = await _resolve_transaction_changes(client, changes)
+    preserved_amount: float | None = None
+
+    if "amount" not in api_changes:
+        before = await client.get_transaction_details(
+            transaction_id=transaction_id,
+            redirect_posted=True,
+        )
+        preserved_amount = _extract_amount(before)
+        if preserved_amount is None:
+            raise RuntimeError(
+                f"Could not read current amount for transaction {transaction_id}; "
+                "refusing metadata update to avoid reverting the amount."
+            )
+        api_changes["amount"] = preserved_amount
+
+    result = await client.update_transaction(transaction_id=transaction_id, **api_changes)
+
+    if preserved_amount is not None:
+        after = await client.get_transaction_details(
+            transaction_id=transaction_id,
+            redirect_posted=True,
+        )
+        actual_amount = _extract_amount(after)
+        if actual_amount is None or not _amounts_match(actual_amount, preserved_amount):
+            actual_text = f"{actual_amount:.2f}" if actual_amount is not None else "unknown"
+            raise RuntimeError(
+                f"Transaction amount verification failed for {transaction_id}: "
+                f"expected {preserved_amount:.2f}, got {actual_text}"
+            )
+
+    return result, api_changes
+
+
 def _normalized_transaction(
     raw: Any,
     *,
@@ -229,9 +317,10 @@ def _create_or_get_transaction(
     update_balance: bool,
     tag_ids: list[str],
     dedupe_fields: list[str],
+    client: Any | None = None,
 ) -> dict[str, Any]:
     """Create a manual transaction, optionally returning a matching existing row first."""
-    client = get_authenticated_client()
+    client = client or get_authenticated_client()
 
     if dedupe_fields:
         raw_existing = run_api_call(
@@ -670,13 +759,16 @@ def update(
         )
         raise typer.Exit(1)
 
+    client = get_authenticated_client()
+    resolved_changes = run_api_call(lambda: _resolve_transaction_changes(client, changes))
+
     # Dry run mode
     if dry_run:
         output(
             {
                 "status": "dry_run",
                 "transaction_id": transaction_id,
-                "changes": changes,
+                "changes": resolved_changes,
                 "message": "No changes applied (dry run mode)",
             },
             output_format,
@@ -685,8 +777,13 @@ def update(
 
     # Apply the update
     with spinner("Updating transaction..."):
-        client = get_authenticated_client()
-        run_api_call(lambda: client.update_transaction(transaction_id=transaction_id, **changes))
+        _result, _api_changes = run_api_call(
+            lambda: _update_transaction_safely(
+                client=client,
+                transaction_id=transaction_id,
+                changes=resolved_changes,
+            )
+        )
 
     output(
         {
@@ -694,7 +791,7 @@ def update(
             "status": "updated",
             "entity": "transaction",
             "transaction_id": transaction_id,
-            "changes": changes,
+            "changes": resolved_changes,
         },
         output_format,
     )
@@ -996,10 +1093,11 @@ def attach(
         )
         note_result = None
         if notes is not None:
-            note_result = run_api_call(
-                lambda: client.update_transaction(
+            note_result, _api_changes = run_api_call(
+                lambda: _update_transaction_safely(
+                    client=client,
                     transaction_id=transaction_id,
-                    notes=notes,
+                    changes={"notes": notes},
                 )
             )
 
@@ -1137,6 +1235,9 @@ def batch_update(
         )
         raise typer.Exit(1)
 
+    client = get_authenticated_client()
+    resolved_changes = run_api_call(lambda: _resolve_transaction_changes(client, changes))
+
     # Dry run mode - just show what would happen
     if dry_run:
         output(
@@ -1146,7 +1247,7 @@ def batch_update(
                 ids=ids,
                 transaction_count=len(ids),
                 transaction_ids=ids,
-                changes=changes,
+                changes=resolved_changes,
                 message=f"Would update {len(ids)} transaction(s) (dry run mode)",
             ),
             output_format,
@@ -1159,7 +1260,6 @@ def batch_update(
         from ..core.config import get_config
 
         config = get_config()
-        client = get_authenticated_client()
         semaphore = asyncio.Semaphore(max_concurrency)
         results: list[dict[str, Any]] = []
 
@@ -1168,7 +1268,11 @@ def batch_update(
             async with semaphore:
                 try:
                     async with asyncio.timeout(config.timeout_seconds):
-                        await client.update_transaction(transaction_id=txn_id, **changes)
+                        await _update_transaction_safely(
+                            client=client,
+                            transaction_id=txn_id,
+                            changes=resolved_changes,
+                        )
                     return {"id": txn_id, "status": "success"}
                 except TimeoutError:
                     return {"id": txn_id, "status": "error", "error": "Request timed out"}
@@ -1189,7 +1293,7 @@ def batch_update(
             "ids": ids,
             "success_count": len(successes),
             "failure_count": len(failures),
-            "changes": changes,
+            "changes": resolved_changes,
             "results": results,
             "failures": failures if failures else None,
         }

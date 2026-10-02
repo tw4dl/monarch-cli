@@ -43,6 +43,26 @@ pipx install monarch-cli
 monarch --version
 ```
 
+## MCP Server (Developers)
+
+This repo includes an MCP server wrapper for the full `monarch` CLI surface.
+
+```bash
+uv sync --extra mcp
+monarch mcp status
+monarch mcp start
+```
+
+See `mcp/README.md` for tool details.
+
+### Codex (MCP) setup
+
+No local checkout (uses the public fork):
+
+```bash
+codex mcp add monarch -- uvx --from "git+https://github.com/tw4dl/monarch-cli.git" --with mcp monarch mcp start
+```
+
 ## Quick Start
 
 ### 1. Authenticate
@@ -147,10 +167,24 @@ monarch accounts recent-balances --start 2024-01-01
 monarch accounts snapshots --start 2024-01-01 --timeframe month
 monarch accounts aggregate-snapshots --start 2024-01-01 --end 2024-12-31
 monarch accounts create --name Cash --type cash --subtype cash --balance 100
+monarch accounts create-investments --name "Manual Brokerage" --subtype brokerage \
+  --holding SECURITY_ID=100 --exclude-from-net-worth --json
 monarch accounts update ACC123 --name "Brokerage" --exclude-from-net-worth
+monarch accounts clone-filtered ACC123 --name "IBKR Clean" --dry-run --json
+monarch accounts clone-filtered ACC123 --name "IBKR Clean" --target-account ACC456 \
+  --normalization-csv usd-overrides.csv --max-writes 25 --json
 monarch accounts upload-history ACC123 balances.csv
 monarch accounts delete ACC123 --yes
 ```
+
+`accounts clone-filtered` creates or incrementally updates a manual account while
+dropping FX-conversion and minor-interest noise. Brokerage clones preserve balance
+history, replay trades and material activity as source-ID-keyed balance-neutral USD
+rows, repair drift in existing clone rows, and default to exclusion from net worth
+so the linked source balance is not counted twice. Repeated runs resync balance
+history and only write new or changed rows. Use `--normalization-csv` for source rows
+that lack durable USD evidence and `--max-writes` to process large histories in
+retry-safe chunks.
 
 ### api
 
@@ -172,7 +206,20 @@ monarch investments holdings --json             # JSON format
 monarch investments holdings --format table     # Table format
 monarch investments holdings --aggregate        # Combine by ticker/name
 monarch investments holdings --account ACC123   # Query a specific investment account
+monarch investments holdings --account ACC123 --detailed --raw --json  # FX audit fields
+monarch investments securities LPKFF --json      # Search Monarch's security catalog
+monarch investments holding create --account ACC123 --security SEC123 --quantity 100
+monarch investments holding update HOLD123 --account ACC123 --quantity 125 --cost-basis 5000
+monarch investments holding delete HOLD123 --account ACC123 --yes
 ```
+
+Holding mutations re-query the exact destination account before reporting success.
+`accounts create-investments` creates a holdings-tracked manual account and refuses
+an existing exact-name account to prevent duplicate retries. Monarch owns security
+market prices: the API accepts security ID, quantity, cost basis, and security type,
+but not a custom current price. Treat missing or stale catalog prices as blockers;
+do not copy a native-currency value into a USD account or alter share quantity to
+force a desired market value.
 
 ### transactions
 
@@ -233,6 +280,12 @@ object with top-level `id`, `status` (`created` or `existing`), transaction fiel
 read `.id` directly. `--tag` is repeatable and is applied before the command
 returns success. `upsert` defaults to `--dedupe-key date,amount,category,notes`;
 `create` can opt into the same duplicate guard with `--dedupe-key`.
+
+Metadata-only transaction writes (`update` without `--amount`, attachment
+`--notes`, and `batch-update`) first read the current amount, include it in the
+Monarch update mutation, and re-read it afterward. If the amount cannot be read
+or does not round-trip unchanged, the command fails instead of risking an
+implicit amount revert.
 
 **Date Presets:**
 - `today`, `yesterday`
@@ -612,3 +665,18 @@ MIT License - see [LICENSE](LICENSE) for details.
 - [monarchmoney](https://github.com/hammem/monarchmoney) - The community Python library for Monarch Money API
 - [Typer](https://typer.tiangolo.com/) - CLI framework
 - [Rich](https://rich.readthedocs.io/) - Terminal formatting
+
+## Offline balance export validation
+
+Validate legacy `Date,Balance,Account` CSV files without Monarch credentials:
+
+```bash
+python scripts/validate_balances_csv.py balances.csv
+```
+
+The validator checks required columns and empty fields. It returns 0 for valid
+structure, 1 for empty fields, and 2 for missing files or headers. It does not
+validate numeric balances or date formats.
+
+See [legacy export migration](docs/legacy-export-migration.md) for the older
+browser exporter and local archive.

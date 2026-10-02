@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Offline balance CSV validator migrated from the legacy exporter, with malformed-row regression coverage.
+- Optional MCP server, holdings mutations, and filtered account cloning.
+
 
 #### Layered Configuration System
 - **Config file support** - Create `~/.config/monarch-cli/config.toml` for persistent settings
@@ -53,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Previously, color settings bypassed auto-detection, causing ANSI codes in piped output
 - **Environment variables** - `MONARCH_TIMEOUT`, `MONARCH_MAX_RETRIES` were documented but non-functional; now wired up to actual API calls
 - **Manual transaction merchant readback** - Created manual transactions preserve the requested merchant name in normalized output when Monarch returns a blank `plaidName`.
+- **Transaction amount preservation** - Metadata-only transaction updates now include and verify the current amount so note, attachment-note, category, and batch updates do not revert corrected amounts.
 - **State-file diagnostics** - Corrupt config/session JSON or TOML files are copied to `*.corrupt.<timestamp>` with a warning instead of being silently ignored.
 
 ## [0.1.0] - 2026-01-18
