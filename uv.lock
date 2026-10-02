@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.12"
 
 [options]
-exclude-newer = "2026-05-21T01:06:20.643442Z"
+exclude-newer = "2026-09-25T19:13:27.012839Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -859,9 +859,10 @@ wheels = [
 
 [[package]]
 name = "monarch-cli"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "click" },
     { name = "keyring" },
     { name = "monarchmoneycommunity" },
     { name = "platformdirs" },
@@ -886,6 +887,7 @@ mcp = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.1.0" },
     { name = "keyring", specifier = ">=24.0.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.27.1,<2.0.0" },
     { name = "monarchmoneycommunity", specifier = ">=1.3.2" },
@@ -899,7 +901,7 @@ requires-dist = [
     { name = "rich", specifier = ">=13.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=5.0.0" },
-    { name = "typer", extras = ["all"], specifier = ">=0.9.0" },
+    { name = "typer", specifier = ">=0.9.0" },
 ]
 provides-extras = ["dev", "mcp"]
 
