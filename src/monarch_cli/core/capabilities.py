@@ -42,6 +42,10 @@ MUTATING_WORDS = {
     "upload",
     "upsert",
 }
+MUTATING_COMMANDS = {
+    "accounts clone-filtered",
+    "accounts create-investments",
+}
 
 
 def _sort_key(value: str) -> tuple[int, ...]:
@@ -86,7 +90,7 @@ def _command_to_dict(name: str, command: click.Command) -> dict[str, Any]:
         ),
         "arguments": arguments,
         "json_output": any("--json" in option["flags"] for option in flags),
-        "mutates": bool(words & MUTATING_WORDS),
+        "mutates": name in MUTATING_COMMANDS or bool(words & MUTATING_WORDS),
     }
 
 

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Offline balance CSV validator migrated from the legacy exporter, with malformed-row regression coverage.
+- Optional MCP server, holdings mutations, and filtered account cloning.
+
+### Fixed
+
+- **Transaction amount preservation** - Metadata-only transaction updates now include and verify the current amount so note, attachment-note, category, and batch updates do not revert corrected amounts.
+
 ## [0.2.0] - 2026-08-27
 
 ### Added

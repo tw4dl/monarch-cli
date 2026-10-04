@@ -52,6 +52,20 @@ def test_capabilities_json_manifest_is_deterministic() -> None:
     assert auth_login["mutates"] is True
     assert "--storage" in {flag for option in auth_login["flags"] for flag in option["flags"]}
 
+    create_investments = next(
+        command for command in data["commands"] if command["name"] == "accounts create-investments"
+    )
+    assert create_investments["mutates"] is True
+
+    holdings_list = next(
+        command for command in data["commands"] if command["name"] == "investments holdings"
+    )
+    holding_create = next(
+        command for command in data["commands"] if command["name"] == "investments holding create"
+    )
+    assert holdings_list["mutates"] is False
+    assert holding_create["mutates"] is True
+
 
 def test_capabilities_plain_points_to_json() -> None:
     result = runner.invoke(app, ["capabilities"])
