@@ -129,3 +129,11 @@ def test_storage_failure_after_write_explains_uncertain_state_without_replay():
     assert "PRIVATE_PATH" not in response.stdout
     assert "mutation Example" not in response.stdout
     client.gql_call.assert_awaited_once()
+
+
+def test_cache_without_unix_fchmod(monkeypatch):
+    from monarch_cli.core.result_cache import load_result, save_result
+
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    identity = save_result({"id": "saved"})
+    assert load_result(identity) == {"id": "saved"}

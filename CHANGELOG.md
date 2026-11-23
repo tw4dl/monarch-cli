@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Raw GraphQL queries honor configured retries; mutations keep zero automatic retries.
+- Full result caching works when the platform lacks Unix file descriptor permission calls.
+
 ### Added
 
 - `budgets settings` reads the native budget system and active rollover period for safe inspection.

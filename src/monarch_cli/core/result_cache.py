@@ -43,7 +43,8 @@ def save_result(data: Any) -> str:
     descriptor, temporary = tempfile.mkstemp(prefix=".result-", dir=directory)
     try:
         with os.fdopen(descriptor, "wb") as stream:
-            os.fchmod(stream.fileno(), 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(stream.fileno(), 0o600)
             stream.write(content)
         os.replace(temporary, target)
     finally:

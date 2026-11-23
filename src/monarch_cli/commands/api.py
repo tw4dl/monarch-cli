@@ -15,6 +15,7 @@ from monarchmoney import MonarchMoney  # type: ignore[import-untyped]
 
 from ..core.adapter import get_authenticated_client
 from ..core.async_utils import run_api_call
+from ..core.config import get_config
 from ..core.error_handler import handle_errors
 from ..core.exceptions import ValidationError
 from ..output import OutputFormat, output
@@ -310,7 +311,9 @@ def api_cmd(
         client = get_authenticated_client()
         data = run_api_call(
             lambda: client.gql_call(operation, graphql_query, variables),
-            max_retries=0 if selected.operation == OperationType.MUTATION else 3,
+            max_retries=0
+            if selected.operation == OperationType.MUTATION
+            else get_config().max_retries,
         )
 
     output(data, output_format)
