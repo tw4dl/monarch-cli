@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Captured help stays plain and keeps option names intact when CI forces terminal colors.
+
 - Raw GraphQL queries honor configured retries; mutations keep zero automatic retries.
 - Full result caching works when the platform lacks Unix file descriptor permission calls.
 

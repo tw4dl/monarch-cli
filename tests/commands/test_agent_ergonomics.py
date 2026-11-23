@@ -116,6 +116,7 @@ def test_corrupt_session_file_is_backed_up(tmp_path: Path, monkeypatch) -> None:
 
 def test_no_color_help_has_no_ansi(monkeypatch) -> None:
     monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
 
     result = runner.invoke(app, ["--help"], color=True)
 

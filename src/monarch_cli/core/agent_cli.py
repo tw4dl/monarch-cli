@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import sys
 from typing import Any
 
@@ -65,6 +66,23 @@ def _configure(command: click.Command, path: str = "monarch") -> None:
     from .help_reference import configure_help
 
     configure_help(command, path)
+    rich_help = command.format_help
+
+    def format_help(ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        configure_help(command, path)
+        # Typer forces Rich terminal output in CI, even for captured help.
+        # Click keeps option names intact and honors plain output for agents.
+        if (
+            not sys.stdout.isatty()
+            or "NO_COLOR" in os.environ
+            or "--no-color" in options().get("argv", [])
+        ):
+            base = click.Group if isinstance(command, click.Group) else click.Command
+            base.format_help(command, ctx, formatter)
+        else:
+            rich_help(ctx, formatter)
+
+    command.format_help = format_help  # type: ignore[method-assign]
 
 
 def _usage_help(exc: click.ClickException) -> str:
