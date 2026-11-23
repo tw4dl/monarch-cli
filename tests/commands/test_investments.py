@@ -332,14 +332,16 @@ class TestInvestmentHoldingMutations:
     def test_creates_holding_and_verifies_exact_readback(self) -> None:
         mock_client = MagicMock()
         mock_client.gql_call = AsyncMock(
-            return_value={
-                "createManualHolding": {
-                    "holding": {"id": "holding-1", "ticker": "LPKFF"},
-                    "errors": [],
-                }
-            }
+            side_effect=[
+                {
+                    "createManualHolding": {
+                        "holding": {"id": "holding-1", "ticker": "LPKFF"},
+                        "errors": [],
+                    }
+                },
+                self._manual_holding_response(),
+            ]
         )
-        mock_client.get_account_holdings = AsyncMock(return_value=self._manual_holding_response())
 
         with (
             patch(
@@ -370,24 +372,25 @@ class TestInvestmentHoldingMutations:
         assert payload["id"] == "holding-1"
         assert payload["verified"] is True
         assert payload["holding"]["quantity"] == 1000
-        _, _, variables = mock_client.gql_call.await_args.args
+        _, _, variables = mock_client.gql_call.await_args_list[0].args
         assert variables == {
             "input": {"accountId": "101", "securityId": "security-1", "quantity": 1000.0}
         }
-        mock_client.get_account_holdings.assert_awaited_once_with(101)
+        assert mock_client.gql_call.await_args.args[0] == "Web_GetHoldingsDetailed"
 
     def test_updates_holding_and_verifies_quantity_and_cost_basis(self) -> None:
         mock_client = MagicMock()
         mock_client.gql_call = AsyncMock(
-            return_value={
-                "updateHolding": {
-                    "holding": {"id": "holding-1", "quantity": 500},
-                    "errors": [],
-                }
-            }
-        )
-        mock_client.get_account_holdings = AsyncMock(
-            return_value=self._manual_holding_response(quantity=500, cost_basis=20000)
+            side_effect=[
+                self._manual_holding_response(quantity=1000, cost_basis=26513.25),
+                {
+                    "updateHolding": {
+                        "holding": {"id": "holding-1", "quantity": 500},
+                        "errors": [],
+                    }
+                },
+                self._manual_holding_response(quantity=500, cost_basis=20000),
+            ]
         )
 
         with (
@@ -419,7 +422,7 @@ class TestInvestmentHoldingMutations:
         assert payload["status"] == "updated"
         assert payload["verified"] is True
         assert payload["holding"]["costBasis"] == 20000
-        _, _, variables = mock_client.gql_call.await_args.args
+        _, _, variables = mock_client.gql_call.await_args_list[1].args
         assert variables == {"input": {"id": "holding-1", "quantity": 500.0, "costBasis": 20000.0}}
 
     def test_delete_holding_requires_yes_and_verifies_absence(self) -> None:
@@ -428,7 +431,16 @@ class TestInvestmentHoldingMutations:
             return_value={"deleteHolding": {"deleted": True, "errors": []}}
         )
         mock_client.get_account_holdings = AsyncMock(
-            return_value={"portfolio": {"aggregateHoldings": {"edges": []}}}
+            side_effect=[
+                {
+                    "portfolio": {
+                        "aggregateHoldings": {
+                            "edges": [{"node": {"holdings": [{"id": "holding-1"}]}}]
+                        }
+                    }
+                },
+                {"portfolio": {"aggregateHoldings": {"edges": []}}},
+            ]
         )
 
         with (

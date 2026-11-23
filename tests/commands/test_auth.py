@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from unittest import mock
 
+import pytest
 from typer.testing import CliRunner
 
 from monarch_cli.core.session import StorageBackend
@@ -32,9 +33,9 @@ class TestAuthStatus:
             result = runner.invoke(app, ["auth", "status"])
 
         assert result.exit_code == 0
-        # Human-readable output goes to stderr (Rich console)
-        assert "Authenticated" in result.stderr
-        assert "keyring" in result.stderr
+        # Default structured data goes to stdout
+        assert "authenticated: true" in result.stdout
+        assert "keyring" in result.stdout
 
     def test_status_human_readable_shows_file_path(self) -> None:
         """Should show file path when using file backend."""
@@ -52,9 +53,9 @@ class TestAuthStatus:
             result = runner.invoke(app, ["auth", "status"])
 
         assert result.exit_code == 0
-        assert "Authenticated" in result.stderr
-        assert "file" in result.stderr
-        assert "session.json" in result.stderr  # Part of the path
+        assert "authenticated: true" in result.stdout
+        assert "file" in result.stdout
+        assert "session.json" in result.stdout  # Part of the path
 
     def test_status_human_readable_shows_env_var(self) -> None:
         """Should show MONARCH_TOKEN when using env backend."""
@@ -72,9 +73,9 @@ class TestAuthStatus:
             result = runner.invoke(app, ["auth", "status"])
 
         assert result.exit_code == 0
-        assert "Authenticated" in result.stderr
-        assert "env" in result.stderr
-        assert "MONARCH_TOKEN" in result.stderr
+        assert "authenticated: true" in result.stdout
+        assert "env" in result.stdout
+        assert "MONARCH_TOKEN" in result.stdout
 
     def test_status_human_readable_when_not_authenticated(self) -> None:
         """Should show human-readable prompt when not authenticated."""
@@ -92,8 +93,8 @@ class TestAuthStatus:
             result = runner.invoke(app, ["auth", "status"])
 
         assert result.exit_code == 0
-        assert "Not authenticated" in result.stderr
-        assert "monarch auth login" in result.stderr
+        assert "Not authenticated" in result.stdout
+        assert "monarch auth login" in result.stdout
 
     def test_status_json_when_authenticated(self) -> None:
         """Should return JSON with --json flag when authenticated."""
@@ -170,7 +171,7 @@ class TestAuthLogout:
         assert result.exit_code == 0
         mock_delete.assert_called_once_with(None)
         mock_reset.assert_called_once()
-        assert "Logged out" in result.stderr
+        assert "logged_out" in result.stdout
 
     def test_logout_keyring_backend(self) -> None:
         """Should clear only keyring backend when specified."""
@@ -182,7 +183,7 @@ class TestAuthLogout:
 
         assert result.exit_code == 0
         mock_delete.assert_called_once_with(StorageBackend.KEYRING)
-        assert "keyring" in result.stderr.lower()
+        assert "keyring" in result.stdout.lower()
 
     def test_logout_file_backend(self) -> None:
         """Should clear only file backend when specified."""
@@ -209,8 +210,8 @@ class TestAuthLogout:
     def test_logout_invalid_backend(self) -> None:
         """Should error on invalid storage backend."""
         result = runner.invoke(app, ["auth", "logout", "-s", "invalid"])
-        assert result.exit_code == 1
-        assert "Invalid storage backend" in result.stderr
+        assert result.exit_code == 2
+        assert "Invalid storage backend" in result.stdout
 
 
 class TestAuthPing:
@@ -235,8 +236,8 @@ class TestAuthPing:
 
         assert result.exit_code == 0
         # Human-readable output goes to stderr (Rich console)
-        assert "Connected" in result.stderr
-        assert "2" in result.stderr
+        assert "Connected" in result.stdout
+        assert "2" in result.stdout
 
     def test_ping_json_success(self) -> None:
         """Should return JSON with --json flag."""
@@ -293,7 +294,7 @@ class TestAuthPing:
             result = runner.invoke(app, ["auth", "ping"])
 
         assert result.exit_code == 1
-        assert "AUTH_REQUIRED" in result.stderr
+        assert "AUTH_REQUIRED" in result.stdout
 
     def test_ping_api_error(self) -> None:
         """Should handle API errors gracefully."""
@@ -312,10 +313,16 @@ class TestAuthPing:
             result = runner.invoke(app, ["auth", "ping"])
 
         assert result.exit_code == 1
-        assert "API_ERROR" in result.stderr
+        assert "API_ERROR" in result.stdout
 
 
 class TestAuthDoctor:
+    @pytest.fixture(autouse=True)
+    def fake_connection(self):
+        client = mock.MagicMock(get_accounts=mock.AsyncMock(return_value={"accounts": []}))
+        with mock.patch("monarch_cli.commands.auth.get_authenticated_client", return_value=client):
+            yield
+
     """Tests for 'monarch auth doctor' command."""
 
     def test_doctor_shows_keyring_available(self) -> None:
@@ -338,8 +345,8 @@ class TestAuthDoctor:
             result = runner.invoke(app, ["auth", "doctor"])
 
         assert result.exit_code == 0
-        assert "Available" in result.stderr
-        assert "SecretService" in result.stderr
+        assert "available: true" in result.stdout
+        assert "SecretService" in result.stdout
 
     def test_doctor_shows_keyring_unavailable(self) -> None:
         """Should show keyring as unavailable when it fails."""
@@ -361,7 +368,7 @@ class TestAuthDoctor:
             result = runner.invoke(app, ["auth", "doctor"])
 
         assert result.exit_code == 0
-        assert "Not available" in result.stderr
+        assert "available: false" in result.stdout
 
     def test_doctor_shows_all_storage_locations(self) -> None:
         """Should display status of all token storage locations."""
@@ -380,8 +387,8 @@ class TestAuthDoctor:
             result = runner.invoke(app, ["auth", "doctor"])
 
         assert result.exit_code == 0
-        assert "MONARCH_TOKEN" in result.stderr
-        assert "env" in result.stderr.lower()
+        assert "has_env_token: true" in result.stdout
+        assert "env" in result.stdout.lower()
 
     def test_doctor_tests_api_when_authenticated(self) -> None:
         """Should test API connectivity when authenticated."""
@@ -411,10 +418,10 @@ class TestAuthDoctor:
             result = runner.invoke(app, ["auth", "doctor"])
 
         assert result.exit_code == 0
-        assert "Connected" in result.stderr
+        assert "status: ok" in result.stdout
         # Rich adds ANSI codes around numbers, so check for "3" and "accounts" separately
-        assert "3" in result.stderr
-        assert "accounts" in result.stderr
+        assert "3" in result.stdout
+        assert "account_count" in result.stdout
 
     def test_doctor_skips_api_when_not_authenticated(self) -> None:
         """Should skip API test when not authenticated."""
@@ -433,7 +440,7 @@ class TestAuthDoctor:
             result = runner.invoke(app, ["auth", "doctor"])
 
         assert result.exit_code == 0
-        assert "Skipped" in result.stderr
+        assert "status: skipped" in result.stdout
 
 
 class TestAuthSetup:
@@ -444,63 +451,44 @@ class TestAuthSetup:
         result = runner.invoke(app, ["auth", "setup"])
 
         assert result.exit_code == 0
-        assert "Quick Start" in result.stderr
-        assert "monarch auth login" in result.stderr
+        assert "login:" in result.stdout
+        assert "monarch auth login" in result.stdout
 
     def test_setup_shows_storage_options(self) -> None:
         """Should display storage backend options."""
         result = runner.invoke(app, ["auth", "setup"])
 
         assert result.exit_code == 0
-        assert "keyring" in result.stderr.lower()
-        assert "file" in result.stderr.lower()
-        assert "MONARCH_TOKEN" in result.stderr
+        assert "keyring" in result.stdout.lower()
+        assert "file" in result.stdout.lower()
+        assert "MONARCH_TOKEN" in result.stdout
 
     def test_setup_shows_troubleshooting(self) -> None:
         """Should display troubleshooting tips."""
         result = runner.invoke(app, ["auth", "setup"])
 
         assert result.exit_code == 0
-        assert "Troubleshooting" in result.stderr
-        assert "monarch auth doctor" in result.stderr
+        assert "help" in result.stdout
+        assert "monarch auth doctor" in result.stdout
 
 
 class TestAuthLogin:
-    """Tests for 'monarch auth login' command.
-
-    Note: Login is interactive and harder to test fully.
-    These tests cover error paths and non-interactive aspects.
-    getpass.getpass() must be mocked as it reads from TTY, not stdin.
-    """
+    """Validation must finish before login can contact Monarch."""
 
     def test_login_invalid_storage_backend(self) -> None:
-        """Should error on invalid --storage value."""
-        with mock.patch("monarch_cli.commands.auth.getpass.getpass", return_value="password"):
-            result = runner.invoke(
-                app,
-                ["auth", "login", "-s", "invalid"],
-                input="test@example.com\n",
-            )
-        assert result.exit_code == 1
-        assert "Invalid storage backend" in result.stderr
+        result = runner.invoke(
+            app, ["auth", "login", "--email", "test@example.com", "-s", "invalid"]
+        )
+        assert result.exit_code == 2
+        assert "Invalid storage backend" in result.stdout
 
     def test_login_keyring_unavailable_with_keyring_flag(self) -> None:
-        """Should error when --storage=keyring but keyring unavailable."""
-        with (
-            mock.patch("monarch_cli.commands.auth.getpass.getpass", return_value="password"),
-            mock.patch(
-                "monarch_cli.commands.auth._is_keyring_available",
-                return_value=False,
-            ),
-        ):
+        with mock.patch("monarch_cli.commands.auth._is_keyring_available", return_value=False):
             result = runner.invoke(
-                app,
-                ["auth", "login", "-s", "keyring"],
-                input="test@example.com\n",
+                app, ["auth", "login", "--email", "test@example.com", "-s", "keyring"]
             )
-
-        assert result.exit_code == 1
-        assert "Keyring not available" in result.stderr
+        assert result.exit_code == 2
+        assert "Keyring not available" in result.stdout
 
 
 class TestKeyringHelpers:

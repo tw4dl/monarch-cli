@@ -10,9 +10,10 @@ import typer
 from ..core.adapter import get_authenticated_client
 from ..core.async_utils import run_api_call
 from ..core.error_handler import handle_errors
+from ..core.exceptions import APIError, ValidationError
 from ..output import OutputFormat, output
 from ..output.progress import spinner
-from ._mutation import extract_id, mutation_result
+from ._mutation import already_absent, complete_ids, mutation_result
 
 app = typer.Typer(
     help=(
@@ -77,6 +78,7 @@ def _list_categories(format: OutputFormat | None, json_output: bool) -> None:
     with spinner("Fetching categories..."):
         client = get_authenticated_client()
         raw_data: dict[str, Any] = run_api_call(lambda: client.get_transaction_categories())
+        complete_ids(raw_data, "categories")
         data = _transform_categories(raw_data)
     output(data, output_format)
 
@@ -180,7 +182,26 @@ def create(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
     """Create a transaction category."""
-    start_month = datetime.fromisoformat(rollover_start) if rollover_start else datetime.now()
+    for field, value in (
+        ("group", group),
+        ("name", name),
+        ("icon", icon),
+        ("rollover-type", rollover_type),
+    ):
+        if not value.strip():
+            raise ValidationError("Provide a nonempty value.", field=field)
+    try:
+        start_month = (
+            datetime.fromisoformat(rollover_start)
+            if rollover_start is not None
+            else datetime.now().replace(day=1)
+        )
+        if rollover_start is not None and start_month.strftime("%Y-%m-%d") != rollover_start:
+            raise ValueError
+    except ValueError as exc:
+        raise ValidationError(
+            "Provide a rollover date in YYYY-MM-DD format.", field="rollover-start"
+        ) from exc
     with spinner("Creating category..."):
         client = get_authenticated_client()
         data: Any = run_api_call(
@@ -191,17 +212,32 @@ def create(
                 icon=icon,
                 rollover_enabled=rollover_enabled,
                 rollover_type=rollover_type,
-            )
+            ),
+            max_retries=0,
+        )
+    payload = (
+        data.get("createCategory") if isinstance(data, dict) and not data.get("errors") else None
+    )
+    category = payload.get("category") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("errors")
+        or not isinstance(category, dict)
+        or not isinstance(category.get("id"), str)
+        or not category["id"]
+        or category.get("name") != name
+        or not isinstance(category.get("group"), dict)
+        or category["group"].get("id") != group
+    ):
+        raise APIError(
+            "Could not confirm category creation. Inspect before retrying.",
+            details={"response": data, "fix": "monarch categories list"},
         )
     output(
         mutation_result(
             status="created",
             entity="category",
-            id=extract_id(
-                data,
-                ("createTransactionCategory", "transactionCategory"),
-                ("createTransactionCategory", "category"),
-            ),
+            id=category["id"],
             name=name,
             group_id=group,
             result=data,
@@ -224,18 +260,47 @@ def delete(
     """Delete one or more categories."""
     output_format = _resolve_format(format, json_output)
     if not yes:
-        output(
-            {"status": "error", "entity": "category", "message": "Category delete requires --yes."},
-            output_format,
-        )
-        raise typer.Exit(1)
+        raise ValidationError("Category delete requires --yes.")
 
     with spinner("Deleting categories..."):
         client = get_authenticated_client()
-        if len(category_ids) == 1:
-            data: Any = run_api_call(lambda: client.delete_transaction_category(category_ids[0]))
+        existing = complete_ids(
+            run_api_call(lambda: client.get_transaction_categories()), "categories"
+        )
+        present = [
+            category_id for category_id in dict.fromkeys(category_ids) if category_id in existing
+        ]
+        if not present:
+            output(
+                already_absent(
+                    "category",
+                    id=category_ids[0] if len(category_ids) == 1 else None,
+                    ids=category_ids,
+                    category_ids=category_ids,
+                ),
+                output_format,
+            )
+            return
+        if len(present) == 1:
+            data: Any = run_api_call(
+                lambda: client.delete_transaction_category(present[0]), max_retries=0
+            )
+            confirmed = data is True
         else:
-            data = run_api_call(lambda: client.delete_transaction_categories(category_ids))
+            data = run_api_call(
+                lambda: client.delete_transaction_categories(present), max_retries=0
+            )
+            confirmed = (
+                isinstance(data, list)
+                and len(data) == len(present)
+                and all(value is True for value in data)
+            )
+        if not confirmed:
+            raise APIError(
+                "Monarch did not confirm all category deletions; "
+                "inspect categories before retrying.",
+                details={"fix": "monarch categories list"},
+            )
     output(
         mutation_result(
             status="deleted",

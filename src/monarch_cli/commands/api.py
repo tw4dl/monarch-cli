@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
-from graphql import GraphQLError, parse
+from graphql import GraphQLError, OperationType, get_operation_ast, parse
 from monarchmoney import MonarchMoney  # type: ignore[import-untyped]
 
 from ..core.adapter import get_authenticated_client
 from ..core.async_utils import run_api_call
+from ..core.config import get_config
 from ..core.error_handler import handle_errors
 from ..core.exceptions import ValidationError
 from ..output import OutputFormat, output
@@ -27,14 +28,14 @@ MONARCHMONEYCOMMUNITY_REPO_URL = "https://github.com/bradleyseanf/monarchmoneyco
 def _load_query(query: str | None, query_file: Path | None) -> str:
     """Load a GraphQL query document from option text, stdin, or file."""
     if query and query_file:
-        raise ValidationError("Use only one query source: --query or --query-file.")
+        raise ValidationError("Use only one query source: --query or --query-file.", field="query")
     if query == "-":
         return sys.stdin.read()
     if query:
         return query
     if query_file:
         return query_file.read_text()
-    raise ValidationError("Provide --query or --query-file.")
+    raise ValidationError("Provide --query or --query-file.", field="query")
 
 
 def _split_field(value: str, option_name: str) -> tuple[str, str]:
@@ -296,8 +297,23 @@ def api_cmd(
             details={"original_error": str(e)},
         ) from e
 
+    selected = get_operation_ast(graphql_query, operation)
+    if selected is None:
+        raise ValidationError(
+            "The query document must contain the named operation.", field="operation"
+        )
+    if selected.operation == OperationType.SUBSCRIPTION:
+        raise ValidationError(
+            "Subscriptions are not supported. Provide a query or mutation.", field="query"
+        )
+
     with spinner("Calling Monarch API..."):
         client = get_authenticated_client()
-        data = run_api_call(lambda: client.gql_call(operation, graphql_query, variables))
+        data = run_api_call(
+            lambda: client.gql_call(operation, graphql_query, variables),
+            max_retries=0
+            if selected.operation == OperationType.MUTATION
+            else get_config().max_retries,
+        )
 
     output(data, output_format)

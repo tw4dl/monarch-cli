@@ -6,6 +6,7 @@ for AI agent consumption. Uses typer.Exit() for testability with CliRunner.
 """
 
 import functools
+import json
 import sys
 import traceback
 from collections.abc import Callable
@@ -15,7 +16,8 @@ import click
 import typer
 
 from ..output import is_debug, output_error
-from .exceptions import MonarchCLIError
+from .agent_context import ACTIVE
+from .exceptions import MonarchCLIError, ValidationError
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -58,16 +60,38 @@ def handle_errors(func: Callable[P, R]) -> Callable[P, R]:  # noqa: UP047
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         try:
             return func(*args, **kwargs)
+        except click.exceptions.Exit:
+            # A command may already have emitted its structured partial result.
+            raise
         except KeyboardInterrupt:
+            if ACTIVE.get():
+                output_error(
+                    MonarchCLIError("Command interrupted. Inspect the target before retrying."),
+                    stdout=_json_requested(),
+                )
+                raise typer.Exit(1) from None
             print("\nInterrupted.", file=sys.stderr)
             raise typer.Exit(130) from None
         except MonarchCLIError as e:
+            if is_debug():
+                traceback.print_exc()
+                if e.details:
+                    print(json.dumps(e.details, default=str), file=sys.stderr)
             output_error(e, stdout=_json_requested())
             raise typer.Exit(e.exit_code) from None
+        except click.ClickException as e:
+            # Local Click validations are usage failures, just like parser failures.
+            output_error(ValidationError(e.format_message()), stdout=_json_requested())
+            raise typer.Exit(2) from None
         except Exception as e:
             if is_debug():
                 traceback.print_exc()
-            output_error(MonarchCLIError(f"Unexpected error: {e}"), stdout=_json_requested())
+            message = (
+                "Command failed. Run with --debug for diagnostics."
+                if ACTIVE.get()
+                else f"Unexpected error: {e}"
+            )
+            output_error(MonarchCLIError(message), stdout=_json_requested())
             raise typer.Exit(1) from None
 
     return wrapper

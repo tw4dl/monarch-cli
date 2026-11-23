@@ -14,6 +14,13 @@ CONTRACT_VERSION = "1"
 
 ENV_VARS: tuple[dict[str, str], ...] = (
     {"name": "MONARCH_TOKEN", "description": "Session token for authentication."},
+    {"name": "MONARCH_EMAIL", "description": "Email for auth login."},
+    {
+        "name": "MONARCH_PASSWORD",
+        "description": "Login password when no password file is supplied.",
+    },
+    {"name": "MONARCH_MFA_CODE", "description": "MFA code for auth login."},
+    {"name": "MONARCH_HOOKS_DISABLED", "description": "Disable native hook registration."},
     {"name": "MONARCH_CONFIG_DIR", "description": "Directory for config and session files."},
     {"name": "MONARCH_SESSION_PATH", "description": "Path to the JSON session file."},
     {"name": "MONARCH_FORMAT", "description": "Default output format."},
@@ -31,11 +38,16 @@ ENV_VARS: tuple[dict[str, str], ...] = (
 MUTATING_WORDS = {
     "attach",
     "create",
+    "clear",
     "delete",
+    "flexible",
+    "flex-rollover",
     "login",
     "logout",
+    "match",
     "refresh",
     "remove",
+    "rename",
     "reset",
     "set",
     "update",
@@ -45,7 +57,15 @@ MUTATING_WORDS = {
 MUTATING_COMMANDS = {
     "accounts clone-filtered",
     "accounts create-investments",
+    "accounts upload-history",
+    "api",
+    "transactions batch-update",
 }
+
+
+def is_mutating(name: str) -> bool:
+    """Mark commands that can write, including the arbitrary GraphQL escape hatch."""
+    return name in MUTATING_COMMANDS or bool(set(name.split()) & MUTATING_WORDS)
 
 
 def _sort_key(value: str) -> tuple[int, ...]:
@@ -80,7 +100,6 @@ def _command_to_dict(name: str, command: click.Command) -> dict[str, Any]:
     arguments = [
         _argument_to_dict(param) for param in command.params if isinstance(param, click.Argument)
     ]
-    words = set(name.split())
     return {
         "name": name,
         "description": command.short_help or command.help or "",
@@ -90,7 +109,7 @@ def _command_to_dict(name: str, command: click.Command) -> dict[str, Any]:
         ),
         "arguments": arguments,
         "json_output": any("--json" in option["flags"] for option in flags),
-        "mutates": name in MUTATING_COMMANDS or bool(words & MUTATING_WORDS),
+        "mutates": is_mutating(name),
     }
 
 
@@ -98,6 +117,8 @@ def _walk_commands(group: click.Group, prefix: str = "") -> list[dict[str, Any]]
     commands: list[dict[str, Any]] = []
     for command_name in sorted(group.commands, key=_sort_key):
         command = group.commands[command_name]
+        if command.hidden:
+            continue
         full_name = f"{prefix} {command_name}".strip()
         commands.append(_command_to_dict(full_name, command))
         if isinstance(command, click.Group):

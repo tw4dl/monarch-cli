@@ -15,6 +15,12 @@ if TYPE_CHECKING:
     pass
 
 
+@pytest.fixture(autouse=True)
+def isolate_native_hook_registration(monkeypatch):
+    """Tests must not modify the user's global agent settings."""
+    monkeypatch.setenv("MONARCH_HOOKS_DISABLED", "1")
+
+
 @pytest.fixture
 def mock_monarch_client() -> MagicMock:
     """Create a mock MonarchMoney client.

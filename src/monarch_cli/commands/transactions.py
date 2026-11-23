@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import shlex
 import sys
+import traceback
 from datetime import date
 from functools import partial
 from pathlib import Path
@@ -16,10 +19,24 @@ from ..core.adapter import get_authenticated_client
 from ..core.async_utils import run_api_call, run_async
 from ..core.dates import DatePreset, parse_date_range
 from ..core.error_handler import handle_errors
-from ..output import OutputFormat, output
+from ..core.exceptions import APIError, ValidationError
+from ..core.mutation_payload import created_record
+from ..core.responses import complete_ids, transaction_page
+from ..core.split_state import normalize_splits, replace_splits
+from ..core.tag_state import change_tags, checked_tag_ids
+from ..core.transaction_search import dedupe_candidates
+from ..core.transaction_update import (
+    checked_current_transaction,
+    confirm_created_fields,
+    confirm_transaction_update,
+    matches_changes,
+    update_zero_amount,
+    validate_transaction_changes,
+)
+from ..output import OutputFormat, is_debug, output
 from ..output.progress import spinner
 from ..transformers.transactions import transform_transaction, transform_transactions
-from ._mutation import extract_id, mutation_result
+from ._mutation import already_absent, mutation_result, transaction_exists
 
 app = typer.Typer(
     help="Transaction management",
@@ -70,26 +87,6 @@ def _parse_dedupe_key(dedupe_key: str | None) -> list[str]:
     return fields
 
 
-def _extract_created_transaction_id(raw: Any) -> str | None:
-    """Extract a transaction ID from common create/upstream response shapes."""
-    if not isinstance(raw, dict):
-        return None
-    if raw.get("id"):
-        return str(raw["id"])
-
-    create_payload = raw.get("createTransaction")
-    if isinstance(create_payload, dict):
-        transaction = create_payload.get("transaction")
-        if isinstance(transaction, dict) and transaction.get("id"):
-            return str(transaction["id"])
-
-    transaction = raw.get("transaction")
-    if isinstance(transaction, dict) and transaction.get("id"):
-        return str(transaction["id"])
-
-    return None
-
-
 def _unwrap_transaction(raw: Any) -> dict[str, Any]:
     """Return the transaction object from detail or raw transaction responses."""
     if not isinstance(raw, dict):
@@ -122,22 +119,30 @@ def _amounts_match(left: float, right: float) -> bool:
 async def _resolve_category_id(client: Any, category: str) -> str:
     """Resolve either a category ID or an exact category name to a category ID."""
     categories_raw = await client.get_transaction_categories()
-    categories = categories_raw.get("categories", [])
+    ids = complete_ids(categories_raw, "categories")
+    categories = categories_raw["categories"]
 
-    if any(item.get("id") == category for item in categories):
+    if category in ids:
         return category
+
+    if any(not isinstance(item.get("name"), str) for item in categories):
+        raise APIError("Cannot resolve a category name from incomplete category data.")
 
     matches = [item for item in categories if item.get("name") == category]
     if len(matches) == 1 and matches[0].get("id"):
         return str(matches[0]["id"])
     if not matches:
-        raise ValueError(
-            f"Unknown category '{category}'. Pass a category ID or exact category name."
+        raise ValidationError(
+            "Unknown category. Pass a category ID or exact category name.",
+            field="category",
+            details={"fix": "monarch categories list"},
         )
 
     match_ids = ", ".join(str(item.get("id")) for item in matches if item.get("id"))
-    raise ValueError(
-        f"Category name '{category}' is ambiguous; use a category ID instead. Matches: {match_ids}"
+    raise ValidationError(
+        f"Category name is ambiguous; use a category ID instead. Matches: {match_ids}",
+        field="category",
+        details={"fix": "monarch categories list"},
     )
 
 
@@ -156,15 +161,19 @@ async def _update_transaction_safely(
     transaction_id: str,
     changes: dict[str, Any],
 ) -> tuple[Any, dict[str, Any]]:
-    """Update a transaction while preserving verified current amount for metadata writes."""
-    api_changes = await _resolve_transaction_changes(client, changes)
+    """Apply already-resolved changes while preserving amount for metadata writes."""
+    api_changes = dict(changes)
     preserved_amount: float | None = None
 
+    before = await client.get_transaction_details(
+        transaction_id=transaction_id,
+        redirect_posted=True,
+    )
+    current = checked_current_transaction(before, transaction_id)
+    if matches_changes(current, transaction_id, api_changes):
+        return {"status": "unchanged"}, api_changes
+
     if "amount" not in api_changes:
-        before = await client.get_transaction_details(
-            transaction_id=transaction_id,
-            redirect_posted=True,
-        )
         preserved_amount = _extract_amount(before)
         if preserved_amount is None:
             raise RuntimeError(
@@ -173,13 +182,18 @@ async def _update_transaction_safely(
             )
         api_changes["amount"] = preserved_amount
 
-    result = await client.update_transaction(transaction_id=transaction_id, **api_changes)
+    if api_changes.get("amount") == 0:
+        result = await update_zero_amount(client, transaction_id, api_changes)
+    else:
+        result = await client.update_transaction(transaction_id=transaction_id, **api_changes)
+    confirm_transaction_update(result, transaction_id, api_changes)
 
     if preserved_amount is not None:
         after = await client.get_transaction_details(
             transaction_id=transaction_id,
             redirect_posted=True,
         )
+        checked_current_transaction(after, transaction_id)
         actual_amount = _extract_amount(after)
         if actual_amount is None or not _amounts_match(actual_amount, preserved_amount):
             actual_text = f"{actual_amount:.2f}" if actual_amount is not None else "unknown"
@@ -320,22 +334,19 @@ def _create_or_get_transaction(
     client: Any | None = None,
 ) -> dict[str, Any]:
     """Create a manual transaction, optionally returning a matching existing row first."""
+    validate_transaction_changes(
+        {"date": date_value, "amount": amount, "merchant_name": merchant, "category_id": category}
+    )
+    if not account.strip():
+        raise ValidationError("Provide an account ID.", field="account")
+    amount = round(amount, 2)  # Match the SDK's creation input before comparing readback.
+    tag_ids = checked_tag_ids(tag_ids)
     client = client or get_authenticated_client()
 
     if dedupe_fields:
-        raw_existing = run_api_call(
-            lambda: client.get_transactions(
-                limit=500,
-                offset=0,
-                start_date=date_value,
-                end_date=date_value,
-                search="",
-                category_ids=[category],
-                account_ids=[account],
-                tag_ids=[],
-            )
-        )
-        for existing in transform_transactions(raw_existing):
+        for existing in dedupe_candidates(
+            client, date=date_value, account=account, category=category, fields=dedupe_fields
+        ):
             if _matches_dedupe_key(
                 existing,
                 dedupe_fields,
@@ -349,11 +360,8 @@ def _create_or_get_transaction(
                 if tag_ids:
                     existing_id = str(existing["id"])
                     run_api_call(
-                        partial(
-                            client.set_transaction_tags,
-                            transaction_id=existing_id,
-                            tag_ids=tag_ids,
-                        )
+                        partial(change_tags, client, existing_id, mode="set", values=tag_ids),
+                        max_retries=0,
                     )
                 return _format_create_result(
                     status="existing",
@@ -371,18 +379,32 @@ def _create_or_get_transaction(
             category_id=category,
             notes=notes,
             update_balance=update_balance,
-        )
+        ),
+        max_retries=0,
     )
-    transaction_id = _extract_created_transaction_id(raw_created)
-    if transaction_id is None:
-        raise ValueError("Create response did not include a transaction ID")
+    transaction_id = created_record(
+        raw_created,
+        "createTransaction",
+        "transaction",
+        fix=shlex.join(
+            [
+                "monarch",
+                "transactions",
+                "list",
+                "--account",
+                account,
+                "--start",
+                date_value,
+                "--end",
+                date_value,
+            ]
+        ),
+    )["id"]
 
     if tag_ids:
         run_api_call(
-            lambda: client.set_transaction_tags(
-                transaction_id=transaction_id,
-                tag_ids=tag_ids,
-            )
+            lambda: change_tags(client, transaction_id, mode="set", values=tag_ids),
+            max_retries=0,
         )
 
     raw_details = run_api_call(
@@ -391,6 +413,39 @@ def _create_or_get_transaction(
             redirect_posted=False,
         )
     )
+    if (
+        not isinstance(raw_details, dict)
+        or raw_details.get("errors")
+        or not isinstance(raw_details.get("getTransaction"), dict)
+        or raw_details["getTransaction"].get("id") != transaction_id
+    ):
+        raise APIError(
+            "Could not confirm the created transaction readback. Inspect before retrying.",
+            details={"fix": shlex.join(["monarch", "transactions", "show", transaction_id])},
+        )
+    confirm_created_fields(
+        raw_details["getTransaction"],
+        transaction_id,
+        account=account,
+        changes={
+            "date": date_value,
+            "amount": amount,
+            "merchant_name": merchant,
+            "category_id": category,
+            "notes": notes,
+        },
+    )
+    if tag_ids:
+        fix = shlex.join(["monarch", "transactions", "show", transaction_id])
+        try:
+            actual_tags = complete_ids(raw_details["getTransaction"], "tags")
+        except APIError as exc:
+            exc.details["fix"] = fix
+            raise
+        if actual_tags != set(tag_ids):
+            raise APIError(
+                "Could not confirm created transaction tags on readback.", details={"fix": fix}
+            )
     transaction = _normalized_transaction(
         raw_details,
         transaction_id=transaction_id,
@@ -418,6 +473,7 @@ def list_cmd(
             "-l",
             "--limit",
             help="Maximum number of transactions to return (API default: 100)",
+            min=1,
         ),
     ] = 100,
     offset: Annotated[
@@ -425,6 +481,7 @@ def list_cmd(
         typer.Option(
             "-o",
             "--offset",
+            min=0,
             help="Number of transactions to skip (for pagination)",
         ),
     ] = 0,
@@ -607,6 +664,7 @@ def list_cmd(
             )
         )
 
+        _, total = transaction_page(raw_data)
         # Transform unless raw mode
         data = raw_data if raw else transform_transactions(raw_data)
 
@@ -614,6 +672,9 @@ def list_cmd(
     if ndjson:
         import json
 
+        from ..output.agent import project
+
+        data = project(data)
         if isinstance(data, list):
             for item in data:
                 print(json.dumps(item, default=str))
@@ -622,7 +683,7 @@ def list_cmd(
             print(json.dumps(data, default=str))
         return
 
-    output(data, output_format, raw=False)
+    output(data, output_format, raw=False, total=total)
 
 
 @app.command()
@@ -747,18 +808,13 @@ def update(
 
     # Require at least one change
     if not changes:
-        output(
-            {
-                "status": "error",
-                "transaction_id": transaction_id,
-                "message": "No changes specified. "
-                "Use --amount, --description, --category, --notes, --date, --goal, "
-                "--hide-from-reports, or --needs-review.",
-            },
-            output_format,
+        raise ValidationError(
+            "No changes specified. "
+            "Use --amount, --description, --category, --notes, --date, --goal, "
+            "--hide-from-reports, or --needs-review."
         )
-        raise typer.Exit(1)
 
+    validate_transaction_changes(changes)
     resolved_changes = dict(changes)
     if "category_id" in changes:
         client = get_authenticated_client()
@@ -785,13 +841,14 @@ def update(
                 client=client,
                 transaction_id=transaction_id,
                 changes=resolved_changes,
-            )
+            ),
+            max_retries=0,
         )
 
     output(
         {
             "id": transaction_id,
-            "status": "updated",
+            "status": "unchanged" if _result == {"status": "unchanged"} else "updated",
             "entity": "transaction",
             "transaction_id": transaction_id,
             "changes": resolved_changes,
@@ -949,19 +1006,30 @@ def delete(
     """Delete a transaction."""
     output_format = OutputFormat.JSON if json_output else format
     if not yes:
-        output(
-            {
-                "status": "error",
-                "entity": "transaction",
-                "message": "Transaction delete requires --yes.",
-            },
-            output_format,
-        )
-        raise typer.Exit(1)
+        raise ValidationError("Transaction delete requires --yes.")
 
     with spinner("Deleting transaction..."):
         client = get_authenticated_client()
-        success: bool = run_api_call(lambda: client.delete_transaction(transaction_id))
+        before = run_api_call(
+            lambda: client.get_transaction_details(
+                transaction_id=transaction_id, redirect_posted=False
+            )
+        )
+        if not transaction_exists(before, transaction_id):
+            output(
+                already_absent("transaction", id=transaction_id, transaction_id=transaction_id),
+                output_format,
+            )
+            return
+        success: bool = run_api_call(
+            lambda: client.delete_transaction(transaction_id), max_retries=0
+        )
+        if success is not True:
+            raise APIError(
+                "Monarch did not confirm transaction deletion; "
+                "inspect transactions before retrying.",
+                details={"fix": "monarch transactions list"},
+            )
     output(
         mutation_result(
             status="deleted" if success else "failed",
@@ -1094,6 +1162,17 @@ def attach(
                 filename=upload_filename,
             )
         )
+        attachment = created_record(
+            attachment_result,
+            "addTransactionAttachment",
+            "attachment",
+            fix=shlex.join(["monarch", "transactions", "show", transaction_id]),
+        )
+        if attachment.get("filename") != upload_filename:
+            raise APIError(
+                "Could not confirm the uploaded filename. Inspect before retrying.",
+                details={"fix": shlex.join(["monarch", "transactions", "show", transaction_id])},
+            )
         note_result = None
         if notes is not None:
             note_result, _api_changes = run_api_call(
@@ -1210,15 +1289,7 @@ def batch_update(
 
     # Validate we have IDs to process
     if not ids:
-        output(
-            {
-                "status": "error",
-                "entity": "transaction",
-                "message": "No transaction IDs provided. Pass IDs as arguments or use --stdin.",
-            },
-            output_format,
-        )
-        raise typer.Exit(1)
+        raise ValidationError("No transaction IDs provided. Pass IDs as arguments or use --stdin.")
 
     # Validate we have at least one change
     changes: dict[str, Any] = {}
@@ -1228,16 +1299,9 @@ def batch_update(
         changes["notes"] = notes
 
     if not changes:
-        output(
-            {
-                "status": "error",
-                "entity": "transaction",
-                "message": "No changes specified. Use --category/-c or --notes/-n.",
-            },
-            output_format,
-        )
-        raise typer.Exit(1)
+        raise ValidationError("No changes specified. Use --category/-c or --notes/-n.")
 
+    validate_transaction_changes(changes)
     client = get_authenticated_client()
     resolved_changes = run_api_call(lambda: _resolve_transaction_changes(client, changes))
 
@@ -1271,23 +1335,34 @@ def batch_update(
             async with semaphore:
                 try:
                     async with asyncio.timeout(config.timeout_seconds):
-                        await _update_transaction_safely(
+                        updated, _changes = await _update_transaction_safely(
                             client=client,
                             transaction_id=txn_id,
                             changes=resolved_changes,
                         )
-                    return {"id": txn_id, "status": "success"}
+                    status = "unchanged" if updated == {"status": "unchanged"} else "success"
+                    return {"id": txn_id, "status": status}
                 except TimeoutError:
-                    return {"id": txn_id, "status": "error", "error": "Request timed out"}
-                except Exception as e:
-                    return {"id": txn_id, "status": "error", "error": str(e)}
+                    message = "Request timed out. Inspect the transaction before retrying."
+                except Exception:
+                    if is_debug():
+                        traceback.print_exc()
+                    message = (
+                        "Could not confirm the update. Inspect the transaction before retrying."
+                    )
+                return {
+                    "id": txn_id,
+                    "status": "error",
+                    "error": message,
+                    "help": f"monarch transactions show {txn_id}",
+                }
 
         # Run all updates concurrently
         tasks = [update_one(txn_id) for txn_id in ids]
         results = await asyncio.gather(*tasks)
 
         # Summarize results
-        successes = [r for r in results if r["status"] == "success"]
+        successes = [r for r in results if r["status"] in {"success", "unchanged"}]
         failures = [r for r in results if r["status"] == "error"]
 
         return {
@@ -1305,6 +1380,8 @@ def batch_update(
         result = run_async(do_batch_update())
 
     output(result, output_format)
+    if result["failure_count"]:
+        raise typer.Exit(1)
 
 
 @tags_app.command("list")
@@ -1328,7 +1405,7 @@ def tags_list(
 @handle_errors
 def tags_create(
     name: Annotated[str, typer.Option("--name", help="Tag name")],
-    color: Annotated[str, typer.Option("--color", help="Tag color")],
+    color: Annotated[str, typer.Option("--color", help="Six-digit RGB color, e.g. #2f855a")],
     format: Annotated[
         OutputFormat | None,
         typer.Option("-f", "--format", help="Output format (plain, json, table, csv, compact)"),
@@ -1337,14 +1414,26 @@ def tags_create(
 ) -> None:
     """Create a transaction tag."""
     output_format = OutputFormat.JSON if json_output else format
+    if not name.strip():
+        raise ValidationError("Provide a nonempty tag name.", field="name")
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        raise ValidationError("Provide a six-digit RGB color such as #2f855a.", field="color")
     with spinner("Creating transaction tag..."):
         client = get_authenticated_client()
-        data: Any = run_api_call(lambda: client.create_transaction_tag(name=name, color=color))
-    tag_id = extract_id(
-        data,
-        ("createTransactionTag", "transactionTag"),
-        ("createTransactionTag", "tag"),
-    )
+        data: Any = run_api_call(
+            lambda: client.create_transaction_tag(name=name, color=color), max_retries=0
+        )
+    tag = created_record(data, "createTransactionTag", "tag", fix="monarch transactions tags list")
+    if (
+        tag.get("name") != name
+        or not isinstance(tag.get("color"), str)
+        or tag["color"].lower() != color.lower()
+    ):
+        raise APIError(
+            "Could not confirm tag creation. Inspect before retrying.",
+            details={"response": data, "fix": "monarch transactions tags list"},
+        )
+    tag_id = tag["id"]
     output(
         mutation_result(
             status="created",
@@ -1374,34 +1463,21 @@ def tags_set(
 ) -> None:
     """Set the exact tag list on a transaction."""
     output_format = OutputFormat.JSON if json_output else format
-    tag_ids = list(tag)
+    tag_ids = checked_tag_ids(list(tag))
     with spinner("Setting transaction tags..."):
         client = get_authenticated_client()
-        data: Any = run_api_call(
-            lambda: client.set_transaction_tags(transaction_id=transaction_id, tag_ids=tag_ids)
+        state = run_api_call(
+            lambda: change_tags(client, transaction_id, mode="set", values=tag_ids), max_retries=0
         )
     output(
         mutation_result(
-            status="updated",
             entity="transaction_tag",
             id=transaction_id,
             transaction_id=transaction_id,
-            tag_ids=tag_ids,
-            result=data,
+            **{key: value for key, value in state.items() if key != "removed_tag_ids"},
         ),
         output_format,
     )
-
-
-def _extract_tag_ids(details: dict[str, Any]) -> list[str]:
-    """Extract tag IDs from common transaction detail response shapes."""
-    transaction = (
-        details.get("transaction") if isinstance(details.get("transaction"), dict) else details
-    )
-    raw_tags = transaction.get("tags") if isinstance(transaction, dict) else []
-    if not isinstance(raw_tags, list):
-        return []
-    return [str(tag["id"]) for tag in raw_tags if isinstance(tag, dict) and tag.get("id")]
 
 
 @tags_app.command("remove")
@@ -1420,25 +1496,16 @@ def tags_remove(
 ) -> None:
     """Remove transaction tags while preserving the remaining tags."""
     output_format = OutputFormat.JSON if json_output else format
-    remove_ids = set(tag)
+    remove_ids = checked_tag_ids(list(tag))
     with spinner("Removing transaction tags..."):
         client = get_authenticated_client()
-        details: dict[str, Any] = run_api_call(
-            lambda: client.get_transaction_details(transaction_id=transaction_id)
-        )
-        remaining = [tag_id for tag_id in _extract_tag_ids(details) if tag_id not in remove_ids]
-        data: Any = run_api_call(
-            lambda: client.set_transaction_tags(transaction_id=transaction_id, tag_ids=remaining)
+        state = run_api_call(
+            lambda: change_tags(client, transaction_id, mode="remove", values=remove_ids),
+            max_retries=0,
         )
     output(
         mutation_result(
-            status="updated",
-            entity="transaction_tag",
-            id=transaction_id,
-            transaction_id=transaction_id,
-            tag_ids=remaining,
-            removed_tag_ids=list(remove_ids),
-            result=data,
+            entity="transaction_tag", id=transaction_id, transaction_id=transaction_id, **state
         ),
         output_format,
     )
@@ -1458,17 +1525,15 @@ def tags_clear(
     output_format = OutputFormat.JSON if json_output else format
     with spinner("Clearing transaction tags..."):
         client = get_authenticated_client()
-        data: Any = run_api_call(
-            lambda: client.set_transaction_tags(transaction_id=transaction_id, tag_ids=[])
+        state = run_api_call(
+            lambda: change_tags(client, transaction_id, mode="clear", values=[]), max_retries=0
         )
     output(
         mutation_result(
-            status="updated",
             entity="transaction_tag",
             id=transaction_id,
             transaction_id=transaction_id,
-            tag_ids=[],
-            result=data,
+            **{key: value for key, value in state.items() if key != "removed_tag_ids"},
         ),
         output_format,
     )
@@ -1495,19 +1560,22 @@ def splits_show(
 def _read_split_data(splits_json: str | None, splits_file: Path | None) -> list[dict[str, Any]]:
     """Read split payload from inline JSON or a JSON file."""
     if splits_json is None and splits_file is None:
-        raise typer.BadParameter("Provide --splits-json or --splits-file.")
+        raise ValidationError("Provide --splits-json or --splits-file.")
     if splits_json is not None and splits_file is not None:
-        raise typer.BadParameter("Use only one of --splits-json or --splits-file.")
+        raise ValidationError("Use only one of --splits-json or --splits-file.")
 
     if splits_json is not None:
         raw = splits_json
     else:
         if splits_file is None:
-            raise typer.BadParameter("Provide --splits-json or --splits-file.")
+            raise ValidationError("Provide --splits-json or --splits-file.")
         raw = splits_file.read_text()
-    data = json.loads(raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValidationError("Split data must be valid JSON.") from exc
     if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
-        raise typer.BadParameter("Split data must be a JSON array of objects.")
+        raise ValidationError("Split data must be a JSON array of objects.")
     return data
 
 
@@ -1537,20 +1605,24 @@ def splits_update(
     ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
-    """Update transaction splits."""
+    """Replace all transaction splits. An empty array clears them.
+
+    Each split requires amount and categoryId (or category_id). Optional fields:
+    merchantName (or merchant_name) and notes. Amounts must total the parent
+    transaction amount, including its sign. Repeated matching state is a no-op.
+    """
     output_format = OutputFormat.JSON if json_output else format
     split_data = _read_split_data(splits_json, splits_file)
+    normalized_splits = normalize_splits(split_data)
     with spinner("Updating transaction splits..."):
         client = get_authenticated_client()
-        data: Any = run_api_call(
-            lambda: client.update_transaction_splits(
-                transaction_id=transaction_id,
-                split_data=split_data,
-            )
+        status, data = run_api_call(
+            lambda: replace_splits(client, transaction_id, normalized_splits),
+            max_retries=0,
         )
     output(
         mutation_result(
-            status="updated",
+            status=status,
             entity="transaction_split",
             id=transaction_id,
             transaction_id=transaction_id,

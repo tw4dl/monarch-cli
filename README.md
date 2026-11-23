@@ -11,8 +11,8 @@ A command-line interface for [Monarch Money](https://www.monarchmoney.com/), a p
 ## Features
 
 - 🔐 **Secure authentication** with session persistence (keyring or file storage)
-- 📊 **Multiple output formats** (plain, JSON, table, CSV, NDJSON) for flexible processing
-- 🔧 **Scriptable** - structured JSON output auto-detected when piped
+- 📊 **Multiple output formats** (TOON, plain, JSON, table, CSV) for flexible processing
+- 🔧 **Scriptable** - explicit JSON output with `--json`; compact TOON by default
 - 📅 **Smart date presets** (`--preset this-month`, `--preset ytd`)
 - ✏️ **Transaction updates** with dry-run preview support
 - 🔄 **Account refresh** to sync latest data from institutions
@@ -47,6 +47,21 @@ not log in or access Keychain. Re-run verification after changing the lockfile.
 
 ### Verify installation
 
+AXI support is implemented and verified, with a documented API limitation:
+unavailable totals remain explicitly unknown. TOON 4.4 is the default; explicit
+JSON/CSV schemas remain available. See the [AXI compliance matrix](docs/axi-compliance.md).
+
+The CLI now defaults to TOON. Use `--json` for the original complete JSON schema,
+`--fields id,name` for a chosen subset, and `--full` for all fields and untruncated
+text. These shared presentation flags work before or after subcommands. Parser
+and API errors are structured on stdout; progress and debug diagnostics use stderr.
+
+Use `monarch accounts show ACCOUNT_ID` to inspect native account settings after
+an update. Recovery hints retain transaction account/date filters and budget
+months. Default receipt rows summarize merchants and linked transactions; tag
+rows retain available transaction counts. Explicit NDJSON supports `--fields`.
+Transaction and cashflow page limits must be positive; offsets cannot be negative.
+
 ```bash
 monarch --version
 ```
@@ -76,8 +91,9 @@ codex mcp add monarch -- uvx --from "git+https://github.com/tw4dl/monarch-cli.gi
 ### 1. Authenticate
 
 ```bash
-# Interactive login (prompts for email/password)
-monarch auth login
+# Login without prompts. Use a UTF-8 file containing your password.
+monarch auth login --email EMAIL --password-file PASSWORD_FILE --storage file
+# If Monarch requires MFA, repeat with --mfa-code CODE.
 
 # Check authentication status
 monarch auth status
@@ -142,14 +158,100 @@ monarch capabilities --json
 The manifest includes commands, flags, arguments, JSON support, documented exit
 codes, environment variables, and config/session file locations.
 
+Every public command supports `--help`. Each reference lists required inputs,
+available flags, explicit defaults (including `false` and `none`), and two or
+three examples. Replace sample IDs and file paths with your own values. Examples
+use previews where the command supports them. Input errors use exit code 2 and
+structured stdout with a repair command; parser repairs retain supplied target IDs.
+Interrupted public commands use code 1 and an inspection hint. Progress stays on
+stderr, and the error does not suggest replaying an uncertain write.
+
+Deleting an already-absent account, transaction, category, holding, or saved report
+returns success with `status: unchanged` after a validated read. Confirmation
+guards still apply. Category deletes skip missing IDs and submit each existing
+ID once. Delete writes are not automatically retried. A rejected or incomplete
+response fails instead of claiming success; bulk category failures also fail.
+Normal successful delete JSON envelopes remain unchanged.
+
+Tag set/remove/clear also acknowledge matching state without writing. Removing
+tags preserves other tags. Tag writes run once and require a confirmed response.
+Raw `api` calls validate the named operation before authentication. Queries may
+retry; mutations never automatically retry. Subscriptions are not supported.
+
+Transaction updates also return `status: unchanged` when a read confirms that
+every requested field already matches. Missing fields do not prove a match.
+Before writing, the CLI requires valid current data for the exact transaction.
+The response must confirm every requested value; rejected or ignored fields fail.
+Batch updates count unchanged items as successes. Any failed item makes the exit
+code 1; structured output retains successes and gives inspection hints for failures.
+Budget writes run once and reject missing or rejected payloads. Category and
+flexible budget setters require the returned amount to match the requested value.
+Holding updates read individual values before and after changes. Matching state
+returns `status: unchanged`; aggregate totals cannot verify individual values.
+Account updates also skip matching state and require the response to confirm
+every requested field. Balance comparisons use the API's displayed balance.
+Unknown or ambiguous transaction category names return code 2 and a category-list
+hint. Category creation validates the returned ID, name, and group; its default
+rollover start is the first day of the current month.
+Manual account/tag creation and attachment uploads require confirmed API records.
+Tags confirm their name and six-digit RGB color; uploads confirm the filename.
+Unconfirmed account creation stops cloning before transaction replay. An
+unconfirmed attachment stops any requested note change.
+Balance-history uploads require confirmed completion. Input CSV must contain
+unique dates, finite amounts, and exactly one `amount` or `balance` column.
+Empty or malformed files fail before authentication. Enabled flex rollover
+checks the returned period month and starting balance against the request.
+Flex rollover independently reads the budget system and active period after writing.
+It checks enabled/disabled state, month, and balance. Use `monarch budgets settings`
+for read-only inspection. See [native readback evidence](docs/budget-settings-api.md).
+
+Read-only commands retain configured API retries. Public write-capable commands
+default to one attempt, including their preparatory API reads. This prevents
+automatic replay of an uncertain write. Raw GraphQL queries use their explicit
+read retry policy; raw mutations execute once.
+
+Malformed `--fields` syntax fails before dependencies. If a valid selection fails
+after a write, the error explains that the operation may have completed and
+suggests an inspection command. It never suggests replaying that write. Network
+errors omit raw dependency messages; `--debug` puts diagnostics on stderr.
+The capabilities manifest marks write-capable commands conservatively, including
+the raw `api` escape hatch, which can execute arbitrary mutations.
+
+TOON also presents nested SDK collections with returned and total counts, compact
+rows, and clear empty states. The default client preview is 100 rows. `--full`
+shows all received rows and fields; server-side pagination still applies.
+Nested field selection uses the original paths, such as
+`monarch accounts history ACCOUNT_ID --fields snapshots.date,snapshots.signedBalance`.
+Cashflow detail applies `--limit` to each complete aggregate list in the TOON
+view. Its explicit JSON response remains unchanged.
+
+When a write returns more content than the preview can show, its full-content
+hint reads a private local result instead of repeating the write:
+
+```bash
+monarch result list
+monarch result show RESULT_ID --full
+monarch result show RESULT_ID --json
+```
+
+The cache holds at most 20 results, up to 10 MiB each, under the Monarch config
+directory. Files are private to your user. Results are available for 24 hours;
+expired and excess entries are pruned when a new result is saved. No Monarch API
+request is needed to read them.
+
+Receipt inbox and security search default to 100 rows. Security search exposes no
+verified total-count interface: its TOON output has `total_count: null` and
+`total_count_available: false`. This is an accepted API limitation, not an error
+or completion blocker. See [security-search evidence](docs/security-search-api.md).
+
 ### auth
 
 Authentication management commands.
 
 ```bash
-monarch auth login               # Interactive login
-monarch auth login -s keyring    # Use system keyring storage
-monarch auth login -s file       # Use file-based storage
+monarch auth login --email EMAIL --password-file PASSWORD_FILE --storage keyring
+monarch auth login --email EMAIL --password-file PASSWORD_FILE --storage file
+monarch auth login --email EMAIL --password-file PASSWORD_FILE --storage file --mfa-code CODE
 
 monarch auth status              # Check authentication status
 monarch auth logout              # Log out and clear credentials
@@ -157,6 +259,44 @@ monarch auth ping                # Test API connectivity
 monarch auth doctor              # Diagnose authentication setup
 monarch auth setup               # Show setup instructions
 ```
+
+Login never prompts. `MONARCH_EMAIL`, `MONARCH_PASSWORD`, and `MONARCH_MFA_CODE`
+can supply login values. A password file takes priority over `MONARCH_PASSWORD`.
+Only the session token is saved. Missing values fail with exit code 2.
+
+Running `monarch` alone reads live account and review-queue counts. Without a
+stored session, it returns an explicit authentication state and a login command.
+
+### Agent session hooks
+
+On invocation, Monarch registers native user hooks for Codex and Claude Code.
+It preserves other hooks and settings. Repeated runs repair the absolute
+executable path without duplicating hooks. `CODEX_HOME` and `CLAUDE_CONFIG_DIR`
+select the respective agent configuration directories.
+
+Session context appears only in directories where Monarch has been run, and their
+subdirectories. Home and filesystem roots are excluded. A session-start hook
+reads account and review counts. Claude session-end hooks and Codex turn-end hooks
+save local transcript metadata and a working-tree file snapshot. Metadata
+stays in `<MONARCH_CONFIG_DIR>/hook-history.json`; conversation text, tool arguments,
+passwords, tokens, and financial records are not copied. The next session receives
+only small summary counts. Transcript tool counts cover at most the last 256 KiB
+and are marked as partial when applicable.
+Counts include Codex function/custom calls and Claude tool-use blocks; output
+records do not count as calls. See [native verification](docs/native-hook-verification.md).
+
+Current Codex requires review of newly registered hooks through `/hooks` or
+Settings > Hooks before they execute. Monarch preserves this native trust check.
+It enables the current `features.hooks` flag; `codex_hooks` is a deprecated alias.
+See the [Codex hook reference](https://learn.chatgpt.com/docs/hooks) and
+[Claude Code hook reference](https://code.claude.com/docs/en/hooks).
+
+Set `MONARCH_HOOKS_DISABLED=1` to disable registration. Remove Monarch's registered
+entries in the agent hook UI to disable existing hooks. Hook errors produce a
+short diagnostic and never block the host session. Native hooks use their host's
+wire contract: session-start context is TOON, while Codex Stop emits empty JSON.
+Explicit `monarch mcp start` likewise retains the negotiated MCP protocol;
+`monarch mcp status` uses the normal structured CLI output.
 
 ### accounts
 
@@ -222,8 +362,10 @@ monarch investments holding delete HOLD123 --account ACC123 --yes
 ```
 
 Holding mutations re-query the exact destination account before reporting success.
-`accounts create-investments` creates a holdings-tracked manual account and refuses
-an existing exact-name account to prevent duplicate retries. Monarch owns security
+`accounts create-investments` creates a holdings-tracked manual account. A unique
+same-name account returns `unchanged` only after its subtype, manual tracking,
+net-worth settings, and individual holdings match the request. Ambiguous names or
+different/unverified state still fail and provide an inspection command. Monarch owns security
 market prices: the API accepts security ID, quantity, cost basis, and security type,
 but not a custom current price. Treat missing or stale catalog prices as blockers;
 do not copy a native-currency value into a USD account or alter share quantity to
@@ -281,6 +423,12 @@ monarch transactions splits update TXN123 --splits-file splits.json
 monarch transactions batch-update TXN1 TXN2 TXN3 --category CAT456
 ```
 
+Split updates replace all existing splits; `[]` clears them. Each row requires
+`amount` and `categoryId` (`category_id` is also accepted). Optional fields are
+`merchantName` (`merchant_name`) and `notes`. Amounts must add up to the parent
+amount with the same sign. Matching splits succeed without writing. Writes run
+once and require confirmed splits and an unchanged parent amount on readback.
+
 `transactions create --json` and `transactions upsert --json` return a normalized
 object with top-level `id`, `status` (`created` or `existing`), transaction fields,
 `tag_ids`, and `dedupe_key`. The upstream raw create response nests the ID at
@@ -288,6 +436,11 @@ object with top-level `id`, `status` (`created` or `existing`), transaction fiel
 read `.id` directly. `--tag` is repeatable and is applied before the command
 returns success. `upsert` defaults to `--dedupe-key date,amount,category,notes`;
 `create` can opt into the same duplicate guard with `--dedupe-key`.
+Duplicate checks search the requested account and date completely before creating.
+Category filtering applies only when `category` is part of the key. Incomplete
+or changing search pages fail safely. Creation uses two-decimal-place rounding,
+confirms the created ID and observed fields, and requires requested tags to survive
+readback before reporting success.
 
 Metadata-only transaction writes (`update` without `--amount`, attachment
 `--notes`, and `batch-update`) first read the current amount, include it in the
@@ -349,12 +502,13 @@ Monarch CLI supports multiple output formats for different use cases:
 
 | Format | Description | Best For |
 |--------|-------------|----------|
+| `toon` | Token-efficient structured output (default) | Agents |
 | `plain` | Human-readable text | Terminal display |
 | `json` | Pretty-printed JSON | Scripts, parsing |
 | `table` | Rich table format | Terminal display |
 | `csv` | Comma-separated values | Spreadsheets |
 | `compact` | Minimal JSON | Compact storage |
-| `ndjson` | Newline-delimited JSON | Stream processing |
+| `--ndjson` on `transactions list` | Newline-delimited JSON | Stream processing |
 
 ```bash
 # Explicit format selection
@@ -365,8 +519,8 @@ monarch accounts list --format csv
 # Shorthand for JSON
 monarch accounts list --json
 
-# Auto-detection: JSON when piped
-monarch accounts list | jq '.[0]'
+# Use explicit JSON when piping to a JSON parser
+monarch accounts list --json | jq '.[0]'
 ```
 
 Mutation commands also accept subcommand-local `--json`/`--format` flags, so
@@ -399,8 +553,8 @@ Each layer overrides the previous, giving you flexible control over defaults and
 Create `~/.config/monarch-cli/config.toml` to set persistent defaults:
 
 ```toml
-# Output format: plain, json, table, csv, compact
-format = "plain"
+# Output format: toon, plain, json, table, csv, compact
+format = "toon"
 
 # Enable colored output (respects NO_COLOR env var)
 color = true
@@ -422,9 +576,13 @@ Environment variables override config file values:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MONARCH_TOKEN` | Session token for authentication | - |
+| `MONARCH_EMAIL` | Email for `auth login` | - |
+| `MONARCH_PASSWORD` | Password for `auth login` when no password file is supplied | - |
+| `MONARCH_MFA_CODE` | MFA code for `auth login` | - |
+| `MONARCH_HOOKS_DISABLED` | Disable native hook registration (`1`, `true`, `yes`) | `false` |
 | `MONARCH_CONFIG_DIR` | Directory for config files | `~/.config/monarch-cli` |
 | `MONARCH_SESSION_PATH` | Path to session file | `<config_dir>/session.json` |
-| `MONARCH_FORMAT` | Default output format (`plain`, `json`, `table`, `csv`, `compact`) | `plain` |
+| `MONARCH_FORMAT` | Output format (`toon`, `plain`, `json`, `table`, `csv`, `compact`) | `toon` |
 | `MONARCH_VERBOSE` | Enable verbose output (`1`, `true`, `yes`) | `false` |
 | `MONARCH_DEBUG` | Enable debug mode with stack traces | `false` |
 | `MONARCH_QUIET` | Output only IDs, one per line | `false` |
@@ -462,8 +620,7 @@ monarch --non-interactive auth login
 |------|---------|
 | `0` | Success |
 | `1` | General error |
-| `2` | Usage error |
-| `4` | Input needed in non-interactive mode |
+| `2` | Usage error or missing input |
 
 ### Authentication Priority
 
@@ -474,17 +631,18 @@ Session credentials are resolved in this order:
 
 ## Scripting & Automation
 
-Monarch CLI is designed for scripting and automation. When output is piped (non-TTY), it automatically outputs JSON:
+Monarch CLI defaults to compact TOON. Request JSON explicitly for existing scripts
+and parsers; this preserves the original complete JSON schemas:
 
 ```bash
-# Auto-JSON when piped
-ACCOUNTS=$(monarch accounts list | jq '.')
+# JSON for scripts
+ACCOUNTS=$(monarch accounts list --json | jq '.')
 
 # Explicit JSON mode
 monarch transactions list --json --preset this-month
 
 # Quiet mode for IDs only
-monarch accounts list --quiet
+monarch --quiet accounts list
 # Output:
 # ACC123456
 # ACC789012
@@ -747,6 +905,10 @@ to apply create/rename. Create supports cash-flow, spending, and income URLs, or
 `--filters-file`/`--view-file` JSON objects. Unknown URL settings are rejected;
 create preview validates offline. Writes have no automatic retries and require
 verified readback. Delete requires `--yes` when not previewing.
+
+A unique same-name report returns `unchanged` only when its complete filters and
+view match, including native defaults. Extra filters or incomplete readback still
+fail and suggest inspection. Renaming an already-named report is also a no-op.
 
 These commands save views; they do not export report data or change transactions.
 The observed update operation renames reports; changing an existing view's filters

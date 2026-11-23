@@ -84,6 +84,7 @@ class TestApiCommand:
                 [
                     "api",
                     "GetAccounts",
+                    "--json",
                     "--query",
                     "query GetAccounts($limit: Int!, $includeHidden: Boolean!) { accounts { id } }",
                     "-F",
@@ -130,6 +131,7 @@ class TestApiCommand:
                 [
                     "api",
                     "GetAccounts",
+                    "--json",
                     "--query-file",
                     str(query_file),
                     "--variables-json",
@@ -142,10 +144,10 @@ class TestApiCommand:
 
     def test_requires_query_source(self) -> None:
         """API command errors when no query source is provided."""
-        result = runner.invoke(app, ["api", "GetAccounts"])
+        result = runner.invoke(app, ["api", "GetAccounts", "--json"])
 
         assert result.exit_code == 2
-        error = json.loads(result.stderr)
+        error = json.loads(result.stdout)
         assert error["code"] == "INVALID_INPUT"
         assert "Provide --query or --query-file" in error["message"]
 
@@ -156,6 +158,7 @@ class TestApiCommand:
             [
                 "api",
                 "GetAccounts",
+                "--json",
                 "--query",
                 "query GetAccounts { accounts { id } }",
                 "-F",
@@ -164,6 +167,6 @@ class TestApiCommand:
         )
 
         assert result.exit_code == 2
-        error = json.loads(result.stderr)
+        error = json.loads(result.stdout)
         assert error["code"] == "INVALID_INPUT"
         assert "key=value" in error["message"]

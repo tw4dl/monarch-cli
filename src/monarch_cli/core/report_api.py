@@ -1,10 +1,12 @@
 """Native saved reports: validated reads and non-retried, verified writes."""
 
+import shlex
 from typing import Any
 
 from .exceptions import APIError, NotFoundError, ValidationError
 from .report_config import LIST_FILTERS, clean_name
 from .report_queries import CREATE_REPORTS, DELETE_REPORT, GET_REPORTS, UPDATE_REPORTS
+from .report_state import report_matches
 
 
 def _object(value: Any, label: str) -> dict[str, Any]:
@@ -39,7 +41,7 @@ async def list_reports(client: Any) -> list[dict[str, Any]]:
         "saved reports",
     )
     rows = data.get("reportConfigurations")
-    if not isinstance(rows, list):
+    if data.get("errors") or not isinstance(rows, list):
         raise APIError("Missing or invalid reportConfigurations list")
     reports = [_report(row) for row in rows]
     if len({row["id"] for row in reports}) != len(reports):
@@ -60,8 +62,17 @@ async def show_report(client: Any, report_id: str) -> dict[str, Any]:
 
 
 def _unique_name(reports: list[dict[str, Any]], name: str, report_id: str | None = None) -> None:
-    if any(row["displayName"] == name and row["id"] != report_id for row in reports):
-        raise ValidationError("A saved report already has this name; inspect report list")
+    matching = [row for row in reports if row["displayName"] == name and row["id"] != report_id]
+    if matching:
+        fix = (
+            shlex.join(["monarch", "report", "show", matching[0]["id"]])
+            if len(matching) == 1
+            else "monarch report list"
+        )
+        raise ValidationError(
+            "A saved report already has this name; inspect its configuration.",
+            details={"fix": fix},
+        )
 
 
 async def _write(
@@ -151,6 +162,15 @@ async def create_report(
     if dry_run:
         return {"status": "dry_run", "entity": "report", "input": spec}
     before = await list_reports(client)
+    matching = [row for row in before if row["displayName"] == spec["displayName"]]
+    if len(matching) == 1 and report_matches(matching[0], spec):
+        return {
+            "status": "unchanged",
+            "entity": "report",
+            "id": matching[0]["id"],
+            "verified": True,
+            "result": matching[0],
+        }
     _unique_name(before, spec["displayName"])
     payload = await _write(
         client,
@@ -234,7 +254,16 @@ async def rename_report(
 
 async def delete_report(client: Any, report_id: str, *, dry_run: bool = False) -> dict[str, Any]:
     """Delete an exact saved report ID and verify it is absent afterward."""
-    before = await show_report(client, report_id)
+    reports = await list_reports(client)
+    before = next((row for row in reports if row["id"] == report_id), None)
+    if before is None:
+        return {
+            "status": "unchanged",
+            "entity": "report",
+            "id": report_id,
+            "verified": True,
+            "message": "Already absent; no write needed.",
+        }
     if dry_run:
         return {"status": "dry_run", "entity": "report", "id": report_id, "before": before}
     payload = await _write(

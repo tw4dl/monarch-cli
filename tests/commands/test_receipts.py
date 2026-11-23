@@ -33,7 +33,7 @@ def test_list_rejects_missing_attachment_data(payload):
 
 def test_missing_filters_and_pagination():
     with patch("monarch_cli.commands.receipts.get_authenticated_client") as get_client:
-        method = AsyncMock(return_value={"allTransactions": {"results": []}})
+        method = AsyncMock(return_value={"allTransactions": {"totalCount": 0, "results": []}})
         get_client.return_value.get_transactions = method
         result = runner.invoke(
             app,
@@ -101,7 +101,8 @@ def test_list_api_failure():
         )
         result = runner.invoke(app, ["receipts", "list", "t1", "--json"])
     assert result.exit_code == 1
-    assert "service unavailable" in json.loads(result.stdout)["message"]
+    assert "--debug" in json.loads(result.stdout)["message"]
+    assert "service unavailable" not in result.stdout
 
 
 def test_scanned_inbox_options():

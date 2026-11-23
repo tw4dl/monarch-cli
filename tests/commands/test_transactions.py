@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -11,6 +11,22 @@ from typer.testing import CliRunner
 from monarch_cli.commands.transactions import _parse_date, app
 
 runner = CliRunner()
+
+
+def _sdk_update_response(transaction_id: str, **changes) -> dict:
+    """Use the installed SDK's selected mutation fields rather than a success flag."""
+    transaction = {"id": transaction_id}
+    names = {"hide_from_reports": "hideFromReports", "needs_review": "needsReview"}
+    for field, value in changes.items():
+        if field == "category_id":
+            transaction["category"] = {"id": value}
+        elif field == "merchant_name":
+            transaction["merchant"] = {"name": value}
+        elif field == "goal_id":
+            transaction["goal"] = {"id": value} if value else None
+        else:
+            transaction[names.get(field, field)] = value
+    return {"updateTransaction": {"errors": [], "transaction": transaction}}
 
 
 class TestParseDateHelper:
@@ -53,6 +69,7 @@ def mock_authenticated_client() -> MagicMock:
                 "amount": -45.67,
                 "date": "2024-01-15",
                 "notes": None,
+                "tags": [],
                 "merchant": {"name": "Coffee Shop"},
                 "category": {"id": "cat_food", "name": "Food & Drink"},
             }
@@ -79,6 +96,7 @@ def sample_transactions_response() -> dict:
     """Sample transactions API response."""
     return {
         "allTransactions": {
+            "totalCount": 2,
             "results": [
                 {
                     "id": "txn_123",
@@ -102,7 +120,7 @@ def sample_transactions_response() -> dict:
                     "isPending": True,
                     "notes": "Weekly groceries",
                 },
-            ]
+            ],
         }
     }
 
@@ -449,7 +467,7 @@ class TestTransactionsList:
         """List handles case with no transactions."""
 
         async def async_get_transactions(**_):
-            return {"allTransactions": {"results": []}}
+            return {"allTransactions": {"totalCount": 0, "results": []}}
 
         mock_authenticated_client.get_transactions = async_get_transactions
 
@@ -488,7 +506,7 @@ class TestTransactionsUpdate:
         """Update with --amount calls API correctly."""
 
         async def async_update_transaction(**_):
-            return {"success": True}
+            return _sdk_update_response(**_)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -514,7 +532,7 @@ class TestTransactionsUpdate:
         """Update with --description calls API correctly."""
 
         async def async_update_transaction(**_):
-            return {"success": True}
+            return _sdk_update_response(**_)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -529,7 +547,7 @@ class TestTransactionsUpdate:
 
             assert result.exit_code == 0
             output = json.loads(result.stdout)
-            assert output["status"] == "updated"
+            assert output["status"] == "unchanged"
             assert output["changes"]["merchant_name"] == "Coffee Shop"
 
     def test_update_with_category(
@@ -541,7 +559,7 @@ class TestTransactionsUpdate:
 
         async def async_update_transaction(**kwargs):
             update_calls.append(kwargs)
-            return {"success": True}
+            return _sdk_update_response(**kwargs)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -571,7 +589,7 @@ class TestTransactionsUpdate:
 
         async def async_update_transaction(**kwargs):
             update_calls.append(kwargs)
-            return {"success": True}
+            return _sdk_update_response(**kwargs)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -598,7 +616,7 @@ class TestTransactionsUpdate:
         """Update with --notes calls API correctly."""
 
         async def async_update_transaction(**_):
-            return {"success": True}
+            return _sdk_update_response(**_)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -640,7 +658,7 @@ class TestTransactionsUpdate:
 
         async def async_update_transaction(**kwargs):
             update_calls.append(kwargs)
-            return {"success": True}
+            return _sdk_update_response(**kwargs)
 
         mock_authenticated_client.get_transaction_details = async_get_transaction_details
         mock_authenticated_client.update_transaction = async_update_transaction
@@ -670,7 +688,7 @@ class TestTransactionsUpdate:
         """Update with multiple flags applies all changes."""
 
         async def async_update_transaction(**_):
-            return {"success": True}
+            return _sdk_update_response(**_)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -709,7 +727,7 @@ class TestTransactionsUpdate:
         """Update accepts --json like other transaction write commands."""
 
         async def async_update_transaction(**_):
-            return {"success": True}
+            return _sdk_update_response(**_)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -736,7 +754,7 @@ class TestTransactionsUpdate:
 
         async def async_update_transaction(**kwargs):
             captured_kwargs.update(kwargs)
-            return {"success": True}
+            return _sdk_update_response(**kwargs)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -783,11 +801,11 @@ class TestTransactionsUpdate:
     def test_update_no_changes_shows_error(self) -> None:
         """Update without any change flags shows error."""
         with patch("monarch_cli.output.progress.is_interactive", return_value=False):
-            result = runner.invoke(app, ["update", "txn_123"])
+            result = runner.invoke(app, ["update", "txn_123", "--json"])
 
-            assert result.exit_code == 1
+            assert result.exit_code == 2
             output = json.loads(result.stdout)
-            assert output["status"] == "error"
+            assert output["error"] is True
             assert "No changes specified" in output["message"]
 
     def test_update_help_shows_examples(self) -> None:
@@ -892,7 +910,13 @@ class TestTransactionsApiCoverage:
             }
 
         async def async_details(transaction_id: str, **_kwargs):
-            return {"getTransaction": {"id": transaction_id, "merchant": {"name": "Payroll"}}}
+            return {
+                "getTransaction": {
+                    "id": transaction_id,
+                    "merchant": {"name": "Payroll"},
+                    "tags": [{"id": "tag_1"}, {"id": "tag_2"}] if tag_calls else [],
+                }
+            }
 
         mock_authenticated_client.create_transaction = async_create
         mock_authenticated_client.set_transaction_tags = async_set_tags
@@ -945,6 +969,7 @@ class TestTransactionsApiCoverage:
             assert kwargs["category_ids"] == ["cat_income"]
             return {
                 "allTransactions": {
+                    "totalCount": 1,
                     "results": [
                         {
                             "id": "txn_existing",
@@ -955,7 +980,7 @@ class TestTransactionsApiCoverage:
                             "account": {"id": "acc_123", "displayName": "Manual Cash"},
                             "notes": "June payroll",
                         }
-                    ]
+                    ],
                 }
             }
 
@@ -1005,7 +1030,7 @@ class TestTransactionsApiCoverage:
 
         async def async_get_transactions(**kwargs):
             get_calls.append(kwargs)
-            return {"allTransactions": {"results": []}}
+            return {"allTransactions": {"totalCount": 0, "results": []}}
 
         async def async_create(**_):
             return {"createTransaction": {"transaction": {"id": "txn_new"}}}
@@ -1072,9 +1097,9 @@ class TestTransactionsApiCoverage:
 
     def test_delete_requires_yes(self) -> None:
         """Transaction delete is guarded."""
-        result = runner.invoke(app, ["delete", "txn_123"])
+        result = runner.invoke(app, ["delete", "txn_123", "--json"])
 
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "requires --yes" in result.stdout
 
     def test_delete_accepts_local_json_flag(self, mock_authenticated_client: MagicMock) -> None:
@@ -1084,6 +1109,9 @@ class TestTransactionsApiCoverage:
             return transaction_id == "txn_123"
 
         mock_authenticated_client.delete_transaction = async_delete
+        mock_authenticated_client.get_transaction_details = AsyncMock(
+            return_value={"getTransaction": {"id": "txn_123"}}
+        )
 
         with (
             patch(
@@ -1133,7 +1161,15 @@ class TestTransactionsApiCoverage:
 
         async def async_set_tags(**kwargs):
             captured.update(kwargs)
-            return {"success": True}
+            return {
+                "setTransactionTags": {
+                    "errors": None,
+                    "transaction": {
+                        "id": kwargs["transaction_id"],
+                        "tags": [{"id": value} for value in kwargs["tag_ids"]],
+                    },
+                }
+            }
 
         mock_authenticated_client.set_transaction_tags = async_set_tags
 
@@ -1159,8 +1195,13 @@ class TestTransactionsApiCoverage:
     ) -> None:
         """Tag create returns top-level id/status/entity."""
 
-        async def async_create_tag(**_kwargs):
-            return {"createTransactionTag": {"transactionTag": {"id": "tag_new"}}}
+        async def async_create_tag(**kwargs):
+            return {
+                "createTransactionTag": {
+                    "errors": [],
+                    "tag": {"id": "tag_new", "name": kwargs["name"], "color": kwargs["color"]},
+                }
+            }
 
         mock_authenticated_client.create_transaction_tag = async_create_tag
 
@@ -1185,9 +1226,14 @@ class TestTransactionsApiCoverage:
         """Tag clear accepts --json and emits a normalized envelope."""
 
         async def async_set_tags(**_kwargs):
-            return {"success": True}
+            return {
+                "setTransactionTags": {"errors": None, "transaction": {"id": "txn_123", "tags": []}}
+            }
 
         mock_authenticated_client.set_transaction_tags = async_set_tags
+        mock_authenticated_client.get_transaction_details = AsyncMock(
+            return_value={"getTransaction": {"id": "txn_123", "tags": [{"id": "old"}]}}
+        )
 
         with (
             patch(
@@ -1208,12 +1254,37 @@ class TestTransactionsApiCoverage:
     def test_splits_update_reads_json(self, mock_authenticated_client: MagicMock) -> None:
         """Split update accepts JSON split data."""
         captured: dict = {}
+        rows: list[dict] = []
+
+        async def async_get_splits(transaction_id):
+            return {
+                "getTransaction": {"id": transaction_id, "amount": 10, "splitTransactions": rows}
+            }
 
         async def async_update_splits(**kwargs):
             captured.update(kwargs)
-            return {"success": True}
+            rows.append(
+                {
+                    "id": "split1",
+                    "amount": 10,
+                    "category": {"id": "cat_1"},
+                    "merchant": {"name": "Store"},
+                    "notes": "",
+                }
+            )
+            return {
+                "updateTransactionSplit": {
+                    "errors": [],
+                    "transaction": {
+                        "id": kwargs["transaction_id"],
+                        "hasSplitTransactions": True,
+                        "splitTransactions": rows,
+                    },
+                }
+            }
 
         mock_authenticated_client.update_transaction_splits = async_update_splits
+        mock_authenticated_client.get_transaction_splits = async_get_splits
 
         with (
             patch(
@@ -1235,7 +1306,7 @@ class TestTransactionsApiCoverage:
 
             assert result.exit_code == 0
             assert captured["transaction_id"] == "txn_123"
-            assert captured["split_data"] == [{"amount": 10, "category_id": "cat_1"}]
+            assert captured["split_data"] == [{"amount": 10, "categoryId": "cat_1"}]
             output = json.loads(result.stdout)
             assert output["id"] == "txn_123"
             assert output["entity"] == "transaction_split"
@@ -1257,7 +1328,12 @@ class TestTransactionsAttach:
 
         async def async_upload_attachment(**kwargs):
             upload_calls.append(kwargs)
-            return {"addTransactionAttachment": {"attachment": {"id": "att_123"}}}
+            return {
+                "addTransactionAttachment": {
+                    "errors": [],
+                    "attachment": {"id": "att_123", "filename": kwargs["filename"]},
+                }
+            }
 
         mock_authenticated_client.upload_attachment = async_upload_attachment
 
@@ -1299,11 +1375,16 @@ class TestTransactionsAttach:
 
         async def async_upload_attachment(**kwargs):
             upload_calls.append(kwargs)
-            return {"ok": True}
+            return {
+                "addTransactionAttachment": {
+                    "errors": [],
+                    "attachment": {"id": "att_123", "filename": kwargs["filename"]},
+                }
+            }
 
         async def async_update_transaction(**kwargs):
             update_calls.append(kwargs)
-            return {"updated": True}
+            return _sdk_update_response(**kwargs)
 
         mock_authenticated_client.upload_attachment = async_upload_attachment
         mock_authenticated_client.update_transaction = async_update_transaction
@@ -1430,7 +1511,7 @@ class TestTransactionsBatchUpdate:
 
         async def async_update_transaction(**kwargs):
             update_calls.append(kwargs)
-            return {"success": True}
+            return _sdk_update_response(**kwargs)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -1443,7 +1524,7 @@ class TestTransactionsBatchUpdate:
         ):
             result = runner.invoke(
                 app,
-                ["batch-update", "txn_123", "txn_456", "--category", "cat_food", "--json"],
+                ["batch-update", "txn_123", "txn_456", "--category", "cat_123", "--json"],
             )
 
             assert result.exit_code == 0
@@ -1453,7 +1534,7 @@ class TestTransactionsBatchUpdate:
             assert output["ids"] == ["txn_123", "txn_456"]
             assert output["success_count"] == 2
             assert output["failure_count"] == 0
-            assert output["changes"]["category_id"] == "cat_food"
+            assert output["changes"]["category_id"] == "cat_123"
             assert output["results"] == [
                 {"id": "txn_123", "status": "success"},
                 {"id": "txn_456", "status": "success"},
@@ -1469,7 +1550,7 @@ class TestTransactionsBatchUpdate:
 
         async def async_update_transaction(**kwargs):
             update_calls.append(kwargs)
-            return {"success": True}
+            return _sdk_update_response(**kwargs)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -1502,7 +1583,7 @@ class TestTransactionsBatchUpdate:
 
         async def async_update_transaction(**kwargs):
             update_calls.append(kwargs)
-            return {"success": True}
+            return _sdk_update_response(**kwargs)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -1537,7 +1618,7 @@ class TestTransactionsBatchUpdate:
 
         async def async_update_transaction(**kwargs):
             update_calls.append(kwargs)
-            return {"success": True}
+            return _sdk_update_response(**kwargs)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -1568,7 +1649,7 @@ class TestTransactionsBatchUpdate:
 
         async def async_update_transaction(**kwargs):
             update_calls.append(kwargs)
-            return {"success": True}
+            return _sdk_update_response(**kwargs)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -1628,7 +1709,7 @@ class TestTransactionsBatchUpdate:
             # Fail on second transaction
             if kwargs.get("transaction_id") == "txn_456":
                 raise Exception("API error: transaction not found")
-            return {"success": True}
+            return _sdk_update_response(**kwargs)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 
@@ -1641,10 +1722,10 @@ class TestTransactionsBatchUpdate:
         ):
             result = runner.invoke(
                 app,
-                ["batch-update", "txn_123", "txn_456", "txn_789", "--category", "cat_food"],
+                ["batch-update", "txn_123", "txn_456", "txn_789", "--category", "cat_123"],
             )
 
-            assert result.exit_code == 0
+            assert result.exit_code == 1
             output = json.loads(result.stdout)
             assert output["status"] == "completed"
             assert output["success_count"] == 2
@@ -1652,26 +1733,27 @@ class TestTransactionsBatchUpdate:
             assert output["failures"] is not None
             assert len(output["failures"]) == 1
             assert output["failures"][0]["id"] == "txn_456"
-            assert "API error" in output["failures"][0]["error"]
+            assert "Could not confirm" in output["failures"][0]["error"]
+            assert output["failures"][0]["help"] == "monarch transactions show txn_456"
 
     def test_batch_update_no_ids_shows_error(self) -> None:
         """Batch update with no IDs shows error."""
         with patch("monarch_cli.output.progress.is_interactive", return_value=False):
-            result = runner.invoke(app, ["batch-update", "--category", "cat_123"])
+            result = runner.invoke(app, ["batch-update", "--category", "cat_123", "--json"])
 
-            assert result.exit_code == 1
+            assert result.exit_code == 2
             output = json.loads(result.stdout)
-            assert output["status"] == "error"
+            assert output["error"] is True
             assert "No transaction IDs provided" in output["message"]
 
     def test_batch_update_no_changes_shows_error(self) -> None:
         """Batch update without changes shows error."""
         with patch("monarch_cli.output.progress.is_interactive", return_value=False):
-            result = runner.invoke(app, ["batch-update", "txn_123"])
+            result = runner.invoke(app, ["batch-update", "txn_123", "--json"])
 
-            assert result.exit_code == 1
+            assert result.exit_code == 2
             output = json.loads(result.stdout)
-            assert output["status"] == "error"
+            assert output["error"] is True
             assert "No changes specified" in output["message"]
 
     def test_batch_update_both_args_and_stdin(
@@ -1683,7 +1765,7 @@ class TestTransactionsBatchUpdate:
 
         async def async_update_transaction(**kwargs):
             update_calls.append(kwargs)
-            return {"success": True}
+            return _sdk_update_response(**kwargs)
 
         mock_authenticated_client.update_transaction = async_update_transaction
 

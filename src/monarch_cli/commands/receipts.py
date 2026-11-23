@@ -1,5 +1,6 @@
 """Receipt attachments and missing-document workflows."""
 
+import shlex
 from datetime import date
 from enum import Enum
 from typing import Annotated, Any
@@ -9,8 +10,9 @@ import typer
 from ..core.adapter import get_authenticated_client
 from ..core.async_utils import run_api_call
 from ..core.error_handler import handle_errors
-from ..core.exceptions import APIError, NetworkError
+from ..core.exceptions import APIError, NetworkError, ValidationError
 from ..core.receipt_api import fetch_inbox, fetch_receipt, match_receipt
+from ..core.responses import transaction_page
 from ..output import OutputFormat, output
 from ..transformers.transactions import transform_transactions
 from .transactions import attach
@@ -33,8 +35,18 @@ def list_receipts(
     )
     transaction = data.get("getTransaction") if isinstance(data, dict) else None
     attachments = transaction.get("attachments") if isinstance(transaction, dict) else None
-    if not isinstance(attachments, list) or any(not isinstance(a, dict) for a in attachments):
-        raise ValueError("Transaction response is missing valid attachment data")
+    if (
+        not isinstance(data, dict)
+        or data.get("errors")
+        or not isinstance(transaction, dict)
+        or transaction.get("id") != transaction_id
+        or not isinstance(attachments, list)
+        or any(not isinstance(a, dict) for a in attachments)
+    ):
+        raise APIError(
+            "Transaction response is missing valid attachment data for the requested ID.",
+            details={"fix": shlex.join(["monarch", "transactions", "show", transaction_id])},
+        )
     output(attachments, OutputFormat.JSON if json_output else format)
 
 
@@ -50,11 +62,16 @@ def missing(
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """List one page of transactions with no attachments; does not imply a receipt is required."""
-    for value in (start, end):
+    for field, value in (("start", start), ("end", end)):
         if value is not None:
-            date.fromisoformat(value)
+            try:
+                parsed = date.fromisoformat(value)
+                if parsed.isoformat() != value:
+                    raise ValueError("Noncanonical date")
+            except ValueError as exc:
+                raise ValidationError("Use a valid YYYY-MM-DD date.", field=field) from exc
     if start and end and date.fromisoformat(start) > date.fromisoformat(end):
-        raise ValueError("Start date must be on or before end date")
+        raise ValidationError("Start date must be on or before end date.", field="end")
     client = get_authenticated_client()
     data: Any = run_api_call(
         lambda: client.get_transactions(
@@ -66,11 +83,12 @@ def missing(
             offset=offset,
         )
     )
-    page = data.get("allTransactions") if isinstance(data, dict) else None
-    results = page.get("results") if isinstance(page, dict) else None
-    if not isinstance(results, list) or any(not isinstance(row, dict) for row in results):
-        raise ValueError("Transaction response is missing valid results")
-    output(transform_transactions(data), OutputFormat.JSON if json_output else format)
+    _, total = transaction_page(data)
+    output(
+        transform_transactions(data),
+        OutputFormat.JSON if json_output else format,
+        total=total,
+    )
 
 
 class ReceiptStatus(str, Enum):
@@ -95,7 +113,7 @@ class ReceiptOrder(str, Enum):
 def inbox(
     status: Annotated[ReceiptStatus | None, typer.Option("--status")] = None,
     order_by: Annotated[ReceiptOrder, typer.Option("--order-by")] = ReceiptOrder.RECEIPT_DATE,
-    limit: Annotated[int, typer.Option("--limit", "-l", min=1)] = 25,
+    limit: Annotated[int, typer.Option("--limit", "-l", min=1)] = 100,
     offset: Annotated[int, typer.Option("--offset", "-o", min=0)] = 0,
     format: Annotated[OutputFormat | None, typer.Option("--format", "-f")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,

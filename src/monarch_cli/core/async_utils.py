@@ -10,6 +10,8 @@ import asyncio
 import concurrent.futures
 from collections.abc import Awaitable, Callable, Coroutine
 
+from .agent_context import ACTIVE, command_path
+from .capabilities import is_mutating
 from .config import get_config
 from .exceptions import NetworkError
 from .retry import RETRYABLE_EXCEPTIONS
@@ -159,7 +161,8 @@ def run_api_call[T](
                       Must be a factory (lambda) because coroutines can only
                       be awaited once, and retries need fresh coroutines.
         timeout_seconds: Override timeout (default: from config).
-        max_retries: Override max retries (default: from config).
+        max_retries: Override retries. Defaults to zero for public write-capable
+                     commands; otherwise uses config.
 
     Returns:
         The result of the API call.
@@ -180,6 +183,8 @@ def run_api_call[T](
     config = get_config()
     effective_timeout = timeout_seconds if timeout_seconds is not None else config.timeout_seconds
     effective_retries = max_retries if max_retries is not None else config.max_retries
+    if max_retries is None and ACTIVE.get() and is_mutating(command_path()):
+        effective_retries = 0
 
     return run_async(
         _with_timeout_and_retry(

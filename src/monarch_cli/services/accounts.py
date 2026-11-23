@@ -10,6 +10,7 @@ from typing import Any
 
 from ..core.adapter import get_authenticated_client
 from ..core.async_utils import run_api_call
+from ..core.responses import complete_ids
 from ..transformers.accounts import transform_accounts
 
 
@@ -26,6 +27,7 @@ def list_accounts() -> list[dict[str, Any]]:
     """
     client = get_authenticated_client()
     raw = run_api_call(lambda: client.get_accounts())
+    complete_ids(raw, "accounts")
     return transform_accounts(raw)
 
 

@@ -9,7 +9,15 @@ import typer
 
 from ..core.adapter import get_authenticated_client
 from ..core.async_utils import run_api_call
+from ..core.budget_result import (
+    check_budget_input,
+    checked_budget_result,
+    read_rollover_settings,
+    verify_rollover_settings,
+)
 from ..core.error_handler import handle_errors
+from ..core.exceptions import ValidationError
+from ..core.responses import records_at
 from ..output import OutputFormat, output
 from ..output.progress import spinner
 from ._mutation import mutation_result
@@ -21,6 +29,18 @@ app = typer.Typer(
     no_args_is_help=False,
     invoke_without_command=True,
 )
+
+
+@app.command("settings")
+@handle_errors
+def settings(
+    format: Annotated[OutputFormat | None, typer.Option("--format", "-f")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Inspect the native budget system and active flex rollover period."""
+    client = get_authenticated_client()
+    data = run_api_call(lambda: read_rollover_settings(client))
+    output(data, OutputFormat.JSON if json_output else format)
 
 
 def _transform_budgets(raw_data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -99,6 +119,8 @@ def _list_budgets(
             raw_data: dict[str, Any] = run_api_call(lambda: client.get_budgets())
         else:
             raw_data = run_api_call(lambda: client.get_budgets(start_date=start, end_date=end))
+        for category in records_at(raw_data, "budgetData.monthlyAmountsByCategory"):
+            records_at(category, "monthlyAmounts")
         data: Any = raw_data if raw else _transform_budgets(raw_data)
 
     output(data, output_format)
@@ -192,9 +214,11 @@ def reset(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
     """Reset budget data."""
+    check_budget_input(start)
     with spinner("Resetting budget..."):
         client = get_authenticated_client()
-        data: Any = run_api_call(lambda: client.reset_budget(start_date=start))
+        data: Any = run_api_call(lambda: client.reset_budget(start_date=start), max_retries=0)
+        checked_budget_result(data, "resetBudget", inspection_start=start)
     output(
         mutation_result(status="reset", entity="budget", start=start, result=data),
         _resolve_format(format, json_output),
@@ -225,15 +249,13 @@ def set_amount(
     """Set a category or category-group budget amount."""
     output_format = _resolve_format(format, json_output)
     if (category is None and group is None) or (category is not None and group is not None):
-        output(
-            {
-                "status": "error",
-                "entity": "budget",
-                "message": "Provide exactly one of --category or --group.",
-            },
-            output_format,
+        raise ValidationError("Provide exactly one of --category or --group.")
+    check_budget_input(start, amount)
+    if not (category or group or "").strip():
+        raise ValidationError(
+            "Provide a nonempty category or group ID.",
+            field="category" if category is not None else "group",
         )
-        raise typer.Exit(1)
 
     with spinner("Updating budget amount..."):
         client = get_authenticated_client()
@@ -245,8 +267,10 @@ def set_amount(
                 timeframe=timeframe,
                 start_date=start,
                 apply_to_future=future,
-            )
+            ),
+            max_retries=0,
         )
+        checked_budget_result(data, "updateOrCreateBudgetItem", amount, inspection_start=start)
     target_id = category or group
     output(
         mutation_result(
@@ -278,6 +302,7 @@ def flexible(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
     """Update flexible budget amount."""
+    check_budget_input(start, amount)
     with spinner("Updating flexible budget..."):
         client = get_authenticated_client()
         data: Any = run_api_call(
@@ -285,8 +310,10 @@ def flexible(
                 amount=amount,
                 start_date=start,
                 apply_to_future=future,
-            )
+            ),
+            max_retries=0,
         )
+        checked_budget_result(data, "updateOrCreateFlexBudgetItem", amount, inspection_start=start)
     output(
         mutation_result(
             status="updated",
@@ -325,15 +352,36 @@ def flex_rollover(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
     """Update flex rollover settings."""
+    if not budget_system.strip():
+        raise ValidationError("Provide a nonempty budget system.", field="budget-system")
+    check_budget_input(start_month, starting_balance, "start-month", "starting-balance")
+    resolved_start = (
+        start_month if start_month is not None else date.today().replace(day=1).isoformat()
+    )
     with spinner("Updating flex rollover settings..."):
         client = get_authenticated_client()
         data: Any = run_api_call(
             lambda: client.update_flex_rollover_settings(
-                rollover_start_month=start_month,
+                rollover_start_month=resolved_start,
                 rollover_starting_balance=starting_balance,
                 rollover_enabled=enabled,
                 budget_system=budget_system,
-            )
+            ),
+            max_retries=0,
+        )
+        checked_budget_result(
+            data,
+            "updateBudgetSettings",
+            period_start=resolved_start if enabled else None,
+            period_balance=starting_balance if enabled else None,
+            inspection_start=resolved_start,
+            inspection_command="monarch budgets settings",
+        )
+        run_api_call(
+            lambda: verify_rollover_settings(
+                client, budget_system, resolved_start, enabled, starting_balance
+            ),
+            max_retries=0,
         )
     output(
         mutation_result(

@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -9,7 +10,7 @@ on:
 jobs:
   check:
     name: Check
-    runs-on: ubicloud-standard-2
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
