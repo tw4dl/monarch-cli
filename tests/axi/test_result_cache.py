@@ -137,3 +137,21 @@ def test_cache_without_unix_fchmod(monkeypatch):
     monkeypatch.delattr(os, "fchmod", raising=False)
     identity = save_result({"id": "saved"})
     assert load_result(identity) == {"id": "saved"}
+
+
+def test_cache_round_trips_unicode_with_non_utf8_locale(monkeypatch):
+    from pathlib import Path
+
+    from monarch_cli.core.result_cache import load_result, save_result
+
+    original_open = Path.open
+
+    def locale_open(path, mode="r", *args, **kwargs):
+        if "b" not in mode and "encoding" not in kwargs:
+            kwargs["encoding"] = "cp1252"
+        return original_open(path, mode, *args, **kwargs)
+
+    data = {"merchant": "Café 東京"}
+    identity = save_result(data)
+    monkeypatch.setattr(Path, "open", locale_open)
+    assert load_result(identity) == data

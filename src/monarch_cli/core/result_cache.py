@@ -97,7 +97,7 @@ def load_result(identity: str) -> Any:
     if target.stat().st_size > MAX_BYTES:
         raise APIError("Cached result exceeds the size limit")
     try:
-        with target.open() as stream:
+        with target.open(encoding="utf-8") as stream:
             return json.load(stream)
     except (OSError, ValueError) as exc:
         raise APIError("Cannot read cached result", details={"fix": "monarch result list"}) from exc

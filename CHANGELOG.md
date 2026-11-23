@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cached results preserve non-ASCII text on systems with a non-UTF-8 default encoding.
+
 - Captured help stays plain and keeps option names intact when CI forces terminal colors.
 
 - Raw GraphQL queries honor configured retries; mutations keep zero automatic retries.
