@@ -91,7 +91,7 @@ def login(
         )
     try:
         password = (
-            password_file.read_text().rstrip("\r\n")
+            password_file.read_text(encoding="utf-8").rstrip("\r\n")
             if password_file
             else os.environ.get("MONARCH_PASSWORD")
         )

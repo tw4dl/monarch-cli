@@ -82,11 +82,19 @@ def test_mfa_missing_code_fails_without_prompt_or_saving(tmp_path):
     save.assert_not_called()
 
 
-def test_mfa_flag_completes_login(tmp_path):
+def test_mfa_flag_completes_login(tmp_path, monkeypatch):
     from monarchmoney import RequireMFAException
 
     secret = tmp_path / "password"
-    secret.write_text("password")
+    secret.write_text("päss東京", encoding="utf-8")
+    original_read = type(secret).read_text
+
+    def locale_read(path, *args, **kwargs):
+        if path == secret and "encoding" not in kwargs:
+            kwargs["encoding"] = "cp1252"
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(secret), "read_text", locale_read)
     client = MagicMock(
         token="session-secret",
         login=AsyncMock(side_effect=RequireMFAException),
@@ -113,7 +121,7 @@ def test_mfa_flag_completes_login(tmp_path):
         )
     assert result.exit_code == 0, result.output
     client.multi_factor_authenticate.assert_awaited_once_with(
-        "me@example.com", "password", "123456"
+        "me@example.com", "päss東京", "123456"
     )
     assert "123456" not in result.output
 
