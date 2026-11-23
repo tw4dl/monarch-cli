@@ -4,24 +4,29 @@ from __future__ import annotations
 
 import csv
 import re
+import shlex
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from functools import partial
+from math import isfinite
 from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 from graphql import parse
-from monarchmoney.monarchmoney import BalanceHistoryRow  # type: ignore[import-untyped]
 
-from ..core.adapter import get_authenticated_client
+from ..core.account_state import change_account, validate_account_changes
+from ..core.adapter import BalanceHistoryRow, get_authenticated_client
 from ..core.async_utils import run_api_call
+from ..core.balance_history import read_balance_history_csv
 from ..core.error_handler import handle_errors
-from ..core.exceptions import APIError, NetworkError, ValidationError
+from ..core.exceptions import APIError, NetworkError, NotFoundError, ValidationError
+from ..core.investment_account_state import holdings_match, settings_match
+from ..core.mutation_payload import created_record
 from ..output import OutputFormat, output
 from ..output.progress import spinner
 from ..services.accounts import list_accounts, refresh_accounts
-from ._mutation import extract_id, mutation_result
+from ._mutation import already_absent, complete_ids, mutation_result
 from .transactions import _create_or_get_transaction
 
 app = typer.Typer(
@@ -79,8 +84,13 @@ def _parse_initial_holdings(values: list[str] | None) -> list[dict[str, Any]]:
                 f"Holding quantity must be finite: {raw_quantity}.",
                 field="holding",
             )
+        native_quantity = float(quantity)
+        if not isfinite(native_quantity) or quantity != 0 and native_quantity == 0:
+            raise ValidationError(
+                "Holding quantity is outside the supported numeric range.", field="holding"
+            )
         seen_security_ids.add(security_id)
-        holdings.append({"securityId": security_id, "quantity": float(quantity)})
+        holdings.append({"securityId": security_id, "quantity": native_quantity})
     return holdings
 
 
@@ -89,15 +99,13 @@ def _investment_account_payload(data: dict[str, Any]) -> dict[str, Any]:
     payload = data.get("createManualInvestmentsAccount")
     if not isinstance(payload, dict):
         raise APIError(
-            "Monarch response did not include createManualInvestmentsAccount.",
+            "Monarch did not confirm investment account creation.",
             details={"response": data},
         )
     errors = payload.get("errors")
     if errors:
-        first = errors[0] if isinstance(errors, list) else errors
-        message = first.get("message") if isinstance(first, dict) else str(first)
         raise APIError(
-            str(message or "Monarch rejected investment account creation."),
+            "Monarch rejected investment account creation; inspect accounts before retrying.",
             details={"errors": errors},
         )
     return payload
@@ -706,6 +714,9 @@ def list_cmd(
     if ndjson:
         import json
 
+        from ..output.agent import project
+
+        data = project(data)
         if isinstance(data, list):
             for item in data:
                 print(json.dumps(item, default=str))
@@ -715,6 +726,30 @@ def list_cmd(
         return
 
     output(data, output_format, raw=False)
+
+
+@app.command("show")
+@handle_errors
+def show(
+    account_id: Annotated[str, typer.Argument(help="Account ID to inspect")],
+    format: Annotated[
+        OutputFormat | None, typer.Option("-f", "--format", help="Output format")
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+) -> None:
+    """Show one account's native metadata, balance, visibility, and activity counts."""
+    if not account_id.strip():
+        raise ValidationError("Provide an account ID.", field="account_id")
+    with spinner("Fetching account..."):
+        client = get_authenticated_client()
+        data = run_api_call(lambda: client.get_accounts())
+        ids = complete_ids(data, "accounts")
+    if account_id not in ids:
+        raise NotFoundError(
+            "Account was not found.", resource_type="account", resource_id=account_id
+        )
+    account = next(row for row in data["accounts"] if row["id"] == account_id)
+    output(account, _resolve_format(format, json_output))
 
 
 @app.command()
@@ -959,6 +994,15 @@ def create(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
     """Create a manual account."""
+    validate_account_changes(
+        None,
+        {
+            "account_name": name,
+            "account_balance": balance,
+            "account_type": account_type,
+            "account_sub_type": subtype,
+        },
+    )
     with spinner("Creating manual account..."):
         client = get_authenticated_client()
         data: Any = run_api_call(
@@ -968,13 +1012,15 @@ def create(
                 is_in_net_worth=in_net_worth,
                 account_name=name,
                 account_balance=balance,
-            )
+            ),
+            max_retries=0,
         )
+    record = created_record(data, "createManualAccount", "account", fix="monarch accounts list")
     output(
         mutation_result(
             status="created",
             entity="account",
-            id=extract_id(data, ("createManualAccount", "account")),
+            id=record["id"],
             result=data,
         ),
         _resolve_format(format, json_output),
@@ -1008,25 +1054,54 @@ def create_investments(
 ) -> None:
     """Create a holdings-tracked manual investment account.
 
-    Refuses an existing exact-name account to prevent duplicate retries. Monarch
+    Acknowledges a verified matching account; refuses ambiguous or different state. Monarch
     derives market values from its own security catalog; custom prices are not
     supported by the account or holding mutation.
     """
+    for field, value in (("name", name), ("subtype", subtype)):
+        if not value.strip():
+            raise ValidationError("Provide a nonempty account value.", field=field)
     initial_holdings = _parse_initial_holdings(holding)
 
     with spinner("Creating manual investment account..."):
         client = get_authenticated_client()
         before: Any = run_api_call(lambda: client.get_accounts())
+        complete_ids(before, "accounts")
         duplicate_ids = [
             str(account.get("id"))
             for account in before.get("accounts", [])
             if account.get("displayName") == name
         ]
         if duplicate_ids:
+            existing = next(row for row in before["accounts"] if row["id"] == duplicate_ids[0])
+            if len(duplicate_ids) == 1 and settings_match(existing, subtype, in_net_worth):
+                from .investments import _get_detailed_holdings_factory
+
+                holdings_data = run_api_call(
+                    _get_detailed_holdings_factory(client, existing["id"]), max_retries=0
+                )
+                if holdings_match(holdings_data, initial_holdings):
+                    output(
+                        {
+                            "status": "unchanged",
+                            "entity": "investment_account",
+                            "id": existing["id"],
+                            "verified": True,
+                            "initial_holding_count": len(initial_holdings),
+                            "account": existing,
+                        },
+                        _resolve_format(format, json_output),
+                    )
+                    return
             raise ValidationError(
                 f"An account named {name!r} already exists; refusing a duplicate.",
                 field="name",
-                details={"account_ids": duplicate_ids},
+                details={
+                    "account_ids": duplicate_ids,
+                    "fix": shlex.join(["monarch", "accounts", "show", duplicate_ids[0]])
+                    if len(duplicate_ids) == 1
+                    else "monarch accounts list",
+                },
             )
 
         data: Any = run_api_call(
@@ -1057,6 +1132,7 @@ def create_investments(
             )
 
         after: Any = run_api_call(lambda: client.get_accounts())
+        complete_ids(after, "accounts")
         created = next(
             (
                 account
@@ -1305,13 +1381,15 @@ def clone_filtered(
                         ),
                         account_name=name,
                         account_balance=float(current_balance),
-                    )
+                    ),
+                    max_retries=0,
                 )
-            target_account_id = extract_id(
-                created_brokerage_account, ("createManualAccount", "account")
-            )
-            if not target_account_id:
-                raise RuntimeError("Manual account create did not return a target account ID.")
+            target_account_id = created_record(
+                created_brokerage_account,
+                "createManualAccount",
+                "account",
+                fix="monarch accounts list",
+            )["id"]
 
         if balance_history_sync_required:
             if not upload_rows:
@@ -1329,8 +1407,15 @@ def clone_filtered(
                     timeout_seconds=310,
                     max_retries=0,
                 )
-            if not upload_success:
-                raise RuntimeError("Balance history upload did not complete successfully.")
+            if upload_success is not True:
+                raise APIError(
+                    "Could not confirm balance history upload. Inspect before retrying.",
+                    details={
+                        "fix": shlex.join(
+                            ["monarch", "accounts", "history", str(target_account_id)]
+                        )
+                    },
+                )
             uploaded_history_rows = len(upload_rows)
 
         target_transactions = _fetch_all_account_transactions(client, str(target_account_id))
@@ -1535,11 +1620,12 @@ def clone_filtered(
                 is_in_net_worth=True if include_in_net_worth is None else include_in_net_worth,
                 account_name=name,
                 account_balance=float(opening_balance),
-            )
+            ),
+            max_retries=0,
         )
-    target_account_id = extract_id(created_account, ("createManualAccount", "account"))
-    if not target_account_id:
-        raise RuntimeError("Manual account create did not return a target account ID.")
+    target_account_id = created_record(
+        created_account, "createManualAccount", "account", fix="monarch accounts list"
+    )["id"]
 
     created_transaction_ids: list[str] = []
     for txn in kept:
@@ -1616,18 +1702,17 @@ def update(
         changes["hide_transactions_from_reports"] = hide_transactions_from_reports
 
     if not changes:
-        output(
-            {"status": "error", "entity": "account", "message": "No account changes specified."},
-            _resolve_format(format, json_output),
-        )
-        raise typer.Exit(1)
+        raise ValidationError("No account changes specified.")
+    validate_account_changes(account_id, changes)
 
     with spinner("Updating account..."):
         client = get_authenticated_client()
-        data: Any = run_api_call(lambda: client.update_account(account_id=account_id, **changes))
+        status, data = run_api_call(
+            lambda: change_account(client, account_id, changes), max_retries=0
+        )
     output(
         mutation_result(
-            status="updated",
+            status=status,
             entity="account",
             id=account_id,
             changes=changes,
@@ -1650,15 +1735,30 @@ def delete(
 ) -> None:
     """Delete an account."""
     if not yes:
-        output(
-            {"status": "error", "entity": "account", "message": "Account delete requires --yes."},
-            _resolve_format(format, json_output),
-        )
-        raise typer.Exit(1)
+        raise ValidationError("Account delete requires --yes.")
 
     with spinner("Deleting account..."):
         client = get_authenticated_client()
-        data: Any = run_api_call(lambda: client.delete_account(account_id=account_id))
+        ids = complete_ids(run_api_call(lambda: client.get_accounts()), "accounts")
+        if account_id not in ids:
+            output(
+                already_absent("account", id=account_id, account_id=account_id),
+                _resolve_format(format, json_output),
+            )
+            return
+        data: Any = run_api_call(
+            lambda: client.delete_account(account_id=account_id), max_retries=0
+        )
+        payload = data.get("deleteAccount") if isinstance(data, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("deleted") is not True
+            or payload.get("errors")
+        ):
+            raise APIError(
+                "Monarch did not confirm account deletion; inspect accounts before retrying.",
+                details={"fix": "monarch accounts list"},
+            )
     output(
         mutation_result(
             status="deleted",
@@ -1673,25 +1773,7 @@ def delete(
 
 def _read_balance_history_csv(path: Path) -> list[BalanceHistoryRow]:
     """Read Monarch balance history rows from CSV."""
-    rows: list[BalanceHistoryRow] = []
-    with path.open(newline="") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            normalized = {
-                key.strip().lower().replace(" ", "_"): value for key, value in row.items()
-            }
-            date_text = normalized.get("date")
-            amount_text = normalized.get("amount") or normalized.get("balance")
-            if not date_text or amount_text is None:
-                raise typer.BadParameter("CSV must include date and amount columns.")
-            rows.append(
-                BalanceHistoryRow(
-                    date=datetime.fromisoformat(date_text),
-                    amount=float(amount_text),
-                    account_name=normalized.get("account_name"),
-                )
-            )
-    return rows
+    return read_balance_history_csv(path)
 
 
 @app.command("upload-history")
@@ -1709,8 +1791,8 @@ def upload_history(
             resolve_path=True,
         ),
     ],
-    timeout: Annotated[int, typer.Option("--timeout", help="Upload timeout seconds")] = 300,
-    delay: Annotated[int, typer.Option("--delay", help="Polling delay seconds")] = 10,
+    timeout: Annotated[int, typer.Option("--timeout", min=1, help="Upload timeout seconds")] = 300,
+    delay: Annotated[int, typer.Option("--delay", min=1, help="Polling delay seconds")] = 10,
     format: Annotated[
         OutputFormat | None,
         typer.Option("-f", "--format", help="Output format (plain, json, table, csv, compact)"),
@@ -1718,6 +1800,8 @@ def upload_history(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
     """Upload historical balance CSV data."""
+    if not account_id.strip():
+        raise ValidationError("Provide an account ID.", field="account_id")
     rows = _read_balance_history_csv(csv_path)
     with spinner("Uploading balance history..."):
         client = get_authenticated_client()
@@ -1731,9 +1815,14 @@ def upload_history(
             timeout_seconds=timeout + delay,
             max_retries=0,
         )
+    if success is not True:
+        raise APIError(
+            "Could not confirm balance history upload. Inspect before retrying.",
+            details={"fix": shlex.join(["monarch", "accounts", "history", account_id])},
+        )
     output(
         mutation_result(
-            status="uploaded" if success else "failed",
+            status="uploaded",
             entity="account",
             id=account_id,
             account_id=account_id,

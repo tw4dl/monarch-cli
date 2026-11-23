@@ -518,7 +518,7 @@ class TestAccountsApiCoverage:
 
         async def async_create(**kwargs):
             captured.update(kwargs)
-            return {"id": "acc_manual"}
+            return {"createManualAccount": {"errors": [], "account": {"id": "acc_manual"}}}
 
         mock_authenticated_client.create_manual_account = async_create
 
@@ -702,9 +702,21 @@ class TestAccountsApiCoverage:
 
         async def async_update(**kwargs):
             captured.update(kwargs)
-            return {"success": True}
+            return {
+                "updateAccount": {
+                    "errors": [],
+                    "account": {
+                        "id": kwargs["account_id"],
+                        "displayName": kwargs["account_name"],
+                        "displayBalance": kwargs["account_balance"],
+                    },
+                }
+            }
 
         mock_authenticated_client.update_account = async_update
+        mock_authenticated_client.get_accounts = AsyncMock(
+            return_value={"accounts": [{"id": "acc_123", "displayName": "Old"}]}
+        )
 
         with (
             patch(
@@ -731,18 +743,22 @@ class TestAccountsApiCoverage:
 
     def test_delete_requires_yes(self) -> None:
         """Account delete is guarded."""
-        result = runner.invoke(app, ["delete", "acc_123"])
+        result = runner.invoke(app, ["delete", "acc_123", "--json"])
 
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "requires --yes" in result.stdout
 
     def test_delete_accepts_local_json_flag(self, mock_authenticated_client: MagicMock) -> None:
         """Account delete accepts --json and emits a normalized envelope."""
 
         async def async_delete(account_id: str):
-            return {"deleted": account_id}
+            assert account_id == "acc_123"
+            return {"deleteAccount": {"deleted": True, "errors": None}}
 
         mock_authenticated_client.delete_account = async_delete
+        mock_authenticated_client.get_accounts = AsyncMock(
+            return_value={"accounts": [{"id": "acc_123"}]}
+        )
 
         with (
             patch(
@@ -758,7 +774,7 @@ class TestAccountsApiCoverage:
             assert output["id"] == "acc_123"
             assert output["entity"] == "account"
             assert output["status"] == "deleted"
-            assert output["result"] == {"deleted": "acc_123"}
+            assert output["result"] == {"deleteAccount": {"deleted": True, "errors": None}}
 
     def test_upload_history_accepts_local_json_flag(
         self, mock_authenticated_client: MagicMock, tmp_path
@@ -809,9 +825,10 @@ class TestAccountsApiCoverage:
 
         async def async_transactions(**kwargs):
             if kwargs.get("account_ids") == ["acc_new"]:
-                return {"allTransactions": {"results": []}}
+                return {"allTransactions": {"totalCount": 0, "results": []}}
             return {
                 "allTransactions": {
+                    "totalCount": 3,
                     "results": [
                         {
                             "id": "txn_keep",
@@ -837,7 +854,7 @@ class TestAccountsApiCoverage:
                             "merchant": {"name": "Usd Credit Int for Jun 2026"},
                             "category": {"id": "cat_transfer", "name": "Transfer"},
                         },
-                    ]
+                    ],
                 }
             }
 
@@ -871,11 +888,15 @@ class TestAccountsApiCoverage:
             assert output["excluded_transaction_count"] == 2
             assert output["opening_balance"] == 900.0
 
+    @pytest.mark.parametrize("rejected", [False, True])
     def test_clone_filtered_creates_manual_account_and_replays_kept_rows(
         self,
         mock_authenticated_client: MagicMock,
+        rejected: bool,
     ) -> None:
         """Clone create path builds a manual account and replays kept transactions."""
+        from monarch_cli.main import app as root_app
+
         created_transactions: list[dict] = []
         created_account: dict = {}
 
@@ -894,9 +915,10 @@ class TestAccountsApiCoverage:
 
         async def async_transactions(**kwargs):
             if kwargs.get("account_ids") == ["acc_new"]:
-                return {"allTransactions": {"results": []}}
+                return {"allTransactions": {"totalCount": 0, "results": []}}
             return {
                 "allTransactions": {
+                    "totalCount": 2,
                     "results": [
                         {
                             "id": "txn_keep",
@@ -916,13 +938,18 @@ class TestAccountsApiCoverage:
                             "category": {"id": "cat_fx", "name": "FX Conversion"},
                             "notes": "drop",
                         },
-                    ]
+                    ],
                 }
             }
 
         async def async_create_manual_account(**kwargs):
             created_account.update(kwargs)
-            return {"id": "acc_new"}
+            return {
+                "createManualAccount": {
+                    "account": {"id": "acc_new"},
+                    "errors": [{"message": "SECRET rejection"}] if rejected else [],
+                }
+            }
 
         async def async_create_transaction(**kwargs):
             created_transactions.append(kwargs)
@@ -930,7 +957,7 @@ class TestAccountsApiCoverage:
 
         async def async_get_transaction_details(**_kwargs):
             return {
-                "transaction": {
+                "getTransaction": {
                     "id": "tx_1",
                     "date": "2026-07-01",
                     "amount": 100.0,
@@ -955,8 +982,9 @@ class TestAccountsApiCoverage:
             patch("monarch_cli.output.progress.is_interactive", return_value=False),
         ):
             result = runner.invoke(
-                app,
+                root_app,
                 [
+                    "accounts",
                     "clone-filtered",
                     "src_1",
                     "--name",
@@ -965,6 +993,11 @@ class TestAccountsApiCoverage:
                 ],
             )
 
+            if rejected:
+                assert result.exit_code == 1
+                assert "SECRET" not in result.stdout
+                assert created_transactions == []
+                return
             assert result.exit_code == 0
             output = json.loads(result.stdout)
             assert output["status"] == "created"
@@ -1025,9 +1058,10 @@ class TestAccountsApiCoverage:
 
         async def async_transactions(**kwargs):
             if kwargs.get("account_ids") == ["acc_clean"]:
-                return {"allTransactions": {"results": []}}
+                return {"allTransactions": {"totalCount": 0, "results": []}}
             return {
                 "allTransactions": {
+                    "totalCount": 9,
                     "results": [
                         {
                             "id": "trade_note",
@@ -1102,7 +1136,7 @@ class TestAccountsApiCoverage:
                             "merchant": {"name": "TDCC Custody Fee"},
                             "category": {"id": "cat_fee", "name": "Financial Fees"},
                         },
-                    ]
+                    ],
                 }
             }
 
@@ -1172,11 +1206,11 @@ class TestAccountsApiCoverage:
             }
 
         async def async_transactions(**_kwargs):
-            return {"allTransactions": {"results": []}}
+            return {"allTransactions": {"totalCount": 0, "results": []}}
 
         async def async_create_manual_account(**kwargs):
             created_account.update(kwargs)
-            return {"id": "target"}
+            return {"createManualAccount": {"account": {"id": "target"}, "errors": []}}
 
         async def async_history(_account_id: int):
             return []
@@ -1231,9 +1265,10 @@ class TestAccountsApiCoverage:
 
         async def async_transactions(**kwargs):
             if kwargs.get("account_ids") == ["202"]:
-                return {"allTransactions": {"results": []}}
+                return {"allTransactions": {"totalCount": 0, "results": []}}
             return {
                 "allTransactions": {
+                    "totalCount": 2,
                     "results": [
                         {
                             "id": "trade_1",
@@ -1252,7 +1287,7 @@ class TestAccountsApiCoverage:
                             "merchant": {"name": "Cash Receipts"},
                             "category": {"id": "cat_transfer", "name": "Transfer"},
                         },
-                    ]
+                    ],
                 }
             }
 
@@ -1261,7 +1296,7 @@ class TestAccountsApiCoverage:
             return {"createTransaction": {"transaction": {"id": "cloned_1"}}}
 
         async def async_get_transaction_details(**_kwargs):
-            return {"transaction": {"id": "cloned_1"}}
+            return {"getTransaction": {"id": "cloned_1"}}
 
         async def async_history(_account_id: int):
             return [{"date": "2026-07-27", "signedBalance": 5000.0}]
@@ -1346,7 +1381,7 @@ class TestAccountsApiCoverage:
             }
 
         async def async_transactions(**_kwargs):
-            return {"allTransactions": {"results": []}}
+            return {"allTransactions": {"totalCount": 0, "results": []}}
 
         async def async_history(account_id: int):
             if account_id == 101:
@@ -1423,6 +1458,7 @@ class TestAccountsApiCoverage:
             if kwargs.get("account_ids") == ["202"]:
                 return {
                     "allTransactions": {
+                        "totalCount": 1,
                         "results": [
                             {
                                 "id": "cloned_1",
@@ -1432,11 +1468,12 @@ class TestAccountsApiCoverage:
                                 "category": {"id": "cat_buy", "name": "Buy"},
                                 "notes": "Older evidence. Source IBKR transaction trade_1.",
                             }
-                        ]
+                        ],
                     }
                 }
             return {
                 "allTransactions": {
+                    "totalCount": 1,
                     "results": [
                         {
                             "id": "trade_1",
@@ -1447,7 +1484,7 @@ class TestAccountsApiCoverage:
                             "category": {"id": "cat_buy", "name": "Buy"},
                             "notes": "FX: -1000000 KRW -> -750.00 USD.",
                         }
-                    ]
+                    ],
                 }
             }
 

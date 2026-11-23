@@ -53,22 +53,24 @@ def test_json_auth_ping_error_emits_json_on_stdout() -> None:
     error = json.loads(result.stdout)
     assert error["error"] is True
     assert error["code"] == "UNKNOWN"
-    assert "missing token" in error["message"]
+    assert "--debug" in error["message"]
+    assert "missing token" not in result.stdout
 
 
 def test_non_interactive_login_fails_before_prompt() -> None:
     result = runner.invoke(app, ["--non-interactive", "auth", "login"])
 
-    assert result.exit_code == 4
-    assert "INPUT_NEEDED" in result.stderr
-    assert "Cannot prompt for Email in non-interactive mode" in result.stderr
+    assert result.exit_code == 2
+    assert "INVALID_INPUT" in result.stdout
+    assert "--email" in result.stdout
 
 
 def test_usage_errors_exit_2_and_suggest_command() -> None:
     result = runner.invoke(app, ["accunts"])
 
     assert result.exit_code == 2
-    assert "Did you mean 'accounts'?" in result.stderr
+    assert "monarch accounts list" in result.stdout
+    assert result.stderr == ""
 
 
 def test_corrupt_config_file_is_backed_up(tmp_path: Path, monkeypatch) -> None:
@@ -127,8 +129,8 @@ def test_ci_env_sets_non_interactive(monkeypatch) -> None:
 
     result = runner.invoke(app, ["auth", "login"])
 
-    assert result.exit_code == 4
-    assert "INPUT_NEEDED" in result.stderr
+    assert result.exit_code == 2
+    assert "INVALID_INPUT" in result.stdout
 
 
 def test_non_interactive_env_var_sets_non_interactive(monkeypatch) -> None:
@@ -136,5 +138,5 @@ def test_non_interactive_env_var_sets_non_interactive(monkeypatch) -> None:
 
     result = runner.invoke(app, ["auth", "login"])
 
-    assert result.exit_code == 4
-    assert "INPUT_NEEDED" in result.stderr
+    assert result.exit_code == 2
+    assert "INVALID_INPUT" in result.stdout

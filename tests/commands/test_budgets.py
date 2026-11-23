@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -418,7 +418,11 @@ class TestBudgetMutations:
 
         async def async_set_budget(**kwargs):
             captured.update(kwargs)
-            return {"success": True}
+            return {
+                "updateOrCreateBudgetItem": {
+                    "budgetItem": {"id": "1", "budgetAmount": kwargs["amount"]}
+                }
+            }
 
         mock_authenticated_client.set_budget_amount = async_set_budget
 
@@ -460,7 +464,11 @@ class TestBudgetMutations:
 
         async def async_flexible(**kwargs):
             captured.update(kwargs)
-            return {"success": True}
+            return {
+                "updateOrCreateFlexBudgetItem": {
+                    "budgetItem": {"id": "1", "budgetAmount": kwargs["amount"]}
+                }
+            }
 
         mock_authenticated_client.update_flexible_budget = async_flexible
 
@@ -484,7 +492,7 @@ class TestBudgetMutations:
         """Reset accepts --json and emits a normalized envelope."""
 
         async def async_reset(**_kwargs):
-            return {"success": True}
+            return {"resetBudget": {"errors": []}}
 
         mock_authenticated_client.reset_budget = async_reset
 
@@ -509,9 +517,20 @@ class TestBudgetMutations:
         """Flex rollover accepts --json and emits a normalized envelope."""
 
         async def async_rollover(**_kwargs):
-            return {"success": True}
+            return {
+                "updateBudgetSettings": {
+                    "budgetRolloverPeriod": {
+                        "id": "1",
+                        "startMonth": "2024-06-01",
+                        "startingBalance": 25,
+                    }
+                }
+            }
 
         mock_authenticated_client.update_flex_rollover_settings = async_rollover
+        mock_authenticated_client.gql_call = AsyncMock(
+            return_value={"budgetSystem": "fixed_and_flex", "flexExpenseRolloverPeriod": None}
+        )
 
         with (
             patch(
@@ -537,7 +556,7 @@ class TestBudgetMutations:
             output = json.loads(result.stdout)
             assert output["entity"] == "budget"
             assert output["status"] == "updated"
-            assert output["result"] == {"success": True}
+            assert output["result"]["updateBudgetSettings"]["budgetRolloverPeriod"]["id"] == "1"
 
 
 class TestBudgetsApp:

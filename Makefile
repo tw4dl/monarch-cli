@@ -1,4 +1,4 @@
-.PHONY: setup verify format format-check lint lint-fix typecheck test release release-dry prepublish
+.PHONY: setup verify verify-axi format format-check lint lint-fix typecheck test release release-dry prepublish
 
 # Setup development environment (run once after cloning)
 setup:
@@ -11,6 +11,10 @@ setup:
 
 # Run all verification steps
 verify: format-check lint typecheck test
+
+# AXI conformance tests; see docs/axi-compliance.md for coverage and remaining gaps.
+verify-axi:
+	uv run pytest tests/axi/ -q
 
 # Format code with ruff
 format:

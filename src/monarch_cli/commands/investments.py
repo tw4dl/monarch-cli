@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from math import isfinite
 from typing import Annotated, Any, cast
 
 import typer
@@ -12,6 +13,7 @@ from ..core.adapter import get_authenticated_client
 from ..core.async_utils import run_api_call
 from ..core.error_handler import handle_errors
 from ..core.exceptions import APIError, ValidationError
+from ..core.responses import complete_ids, records_at
 from ..output import OutputFormat, output
 from ..output.progress import spinner
 
@@ -190,29 +192,18 @@ def _get_detailed_holdings_factory(
     return call
 
 
-def _payload_error_message(errors: Any) -> str:
-    """Extract a useful message from Monarch mutation payload errors."""
-    if isinstance(errors, dict):
-        return str(errors.get("message") or errors)
-    if isinstance(errors, list) and errors:
-        first = errors[0]
-        if isinstance(first, dict):
-            return str(first.get("message") or first)
-    return str(errors)
-
-
 def _mutation_payload(data: dict[str, Any], field: str) -> dict[str, Any]:
     """Validate a holding mutation payload and surface Monarch errors."""
     payload = data.get(field)
     if not isinstance(payload, dict):
         raise APIError(
-            f"Monarch response did not include {field}.",
+            "Monarch did not confirm the holding change.",
             details={"response": data},
         )
     errors = payload.get("errors")
     if errors:
         raise APIError(
-            _payload_error_message(errors),
+            "Monarch rejected the holding change; inspect the holding before retrying.",
             details={"operation": field, "errors": errors},
         )
     return payload
@@ -221,25 +212,45 @@ def _mutation_payload(data: dict[str, Any], field: str) -> dict[str, Any]:
 def _find_holding_by_id(
     holdings_data: dict[str, Any],
     holding_id: str,
+    *,
+    exact_values: bool = False,
 ) -> dict[str, Any] | None:
     """Find one exact account holding and include its aggregate valuation data."""
-    edges = holdings_data.get("portfolio", {}).get("aggregateHoldings", {}).get("edges", [])
+    portfolio = holdings_data.get("portfolio") if isinstance(holdings_data, dict) else None
+    aggregate = portfolio.get("aggregateHoldings") if isinstance(portfolio, dict) else None
+    edges = aggregate.get("edges") if isinstance(aggregate, dict) else None
+    if not isinstance(edges, list):
+        raise APIError("Cannot verify holding absence: invalid account holdings response")
     for edge in edges:
-        node = edge.get("node") or {}
+        node = edge.get("node") if isinstance(edge, dict) else None
+        if not isinstance(node, dict):
+            raise APIError("Cannot verify holding absence: invalid holdings record")
         security = node.get("security") or {}
-        holdings = node.get("holdings") or []
+        holdings = node.get("holdings")
         if isinstance(holdings, dict):
             holdings = [holdings]
+        if not isinstance(holdings, list):
+            raise APIError("Cannot verify holding absence: missing individual holdings")
         for holding in holdings:
-            if not isinstance(holding, dict) or str(holding.get("id")) != holding_id:
+            if (
+                not isinstance(holding, dict)
+                or not isinstance(holding.get("id"), str)
+                or not holding["id"]
+            ):
+                raise APIError("Cannot verify holding absence: invalid holding ID")
+            if holding["id"] != holding_id:
                 continue
             return {
                 "id": holding_id,
                 "security_id": str(security.get("id") or node.get("id") or ""),
                 "name": holding.get("name") or security.get("name"),
                 "ticker": holding.get("ticker") or security.get("ticker"),
-                "quantity": holding.get("quantity", node.get("quantity")),
-                "costBasis": holding.get("costBasis", node.get("basis")),
+                "quantity": holding.get("quantity")
+                if exact_values
+                else holding.get("quantity", node.get("quantity")),
+                "costBasis": holding.get("costBasis")
+                if exact_values
+                else holding.get("costBasis", node.get("basis")),
                 "security_type": holding.get("type") or security.get("type"),
                 "is_manual": holding.get("isManual"),
                 "current_price": security.get("currentPrice"),
@@ -272,7 +283,7 @@ def _assert_holding_changes(
     mismatches = {
         key: {"expected": value, "actual": holding.get(key)}
         for key, value in expected.items()
-        if value is not None and holding.get(key) != value
+        if value is not None and (holding.get(key) != value or isinstance(holding.get(key), bool))
     }
     if mismatches:
         raise APIError(
@@ -329,11 +340,13 @@ def _flatten_holdings(
     holdings_data: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Flatten Monarch holdings API data into tabular rows."""
-    edges = holdings_data.get("portfolio", {}).get("aggregateHoldings", {}).get("edges", [])
+    edges = records_at(holdings_data, "portfolio.aggregateHoldings.edges")
 
     rows = []
     for edge in edges:
-        node = edge.get("node") or {}
+        node = edge.get("node")
+        if not isinstance(node, dict):
+            raise APIError("Missing or invalid holdings record")
         security = node.get("security") or {}
         holding_info = _first_holding_info(node)
         ticker = security.get("ticker") or holding_info.get("ticker")
@@ -460,7 +473,8 @@ def holdings_cmd(
     with spinner("Fetching investment holdings..."):
         client = get_authenticated_client()
         accounts_data = run_api_call(lambda: _get_accounts_call(client))
-        accounts = accounts_data.get("accounts", [])
+        complete_ids(accounts_data, "accounts")
+        accounts = records_at(accounts_data, "accounts")
         selected_accounts = _select_accounts(
             accounts,
             account_ids=account_ids,
@@ -504,7 +518,7 @@ def securities_cmd(
     limit: Annotated[
         int,
         typer.Option("--limit", min=1, max=100, help="Maximum search results."),
-    ] = 10,
+    ] = 100,
     format: Annotated[
         OutputFormat | None,
         typer.Option("-f", "--format", help="Output format (plain, json, table, csv, compact)"),
@@ -522,7 +536,8 @@ def securities_cmd(
                 {"search": search, "limit": limit, "orderByPopularity": True},
             )
         )
-    securities = data.get("securities", [])
+    complete_ids(data, "securities")
+    securities = data["securities"]
     output(securities, OutputFormat.JSON if json_output else format)
 
 
@@ -539,6 +554,11 @@ def holding_create_cmd(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
     """Create a manual holding and verify it by exact account readback."""
+    if not isfinite(quantity):
+        raise ValidationError("Provide a finite holding value.", field="quantity")
+    for field, value in (("account", account), ("security", security)):
+        if not value.strip():
+            raise ValidationError("Provide a nonempty holding identifier.", field=field)
     with spinner("Creating manual holding..."):
         client = get_authenticated_client()
         data = run_api_call(
@@ -560,7 +580,11 @@ def holding_create_cmd(
         holding_id = str(mutation_holding.get("id") or "")
         if not holding_id:
             raise APIError("Holding create did not return a holding ID.")
-        holding = _read_exact_holding(client, account, holding_id)
+        holding = _find_holding_by_id(
+            run_api_call(_get_detailed_holdings_factory(client, account)),
+            holding_id,
+            exact_values=True,
+        )
         if holding is None:
             raise APIError(
                 "Created holding was absent from exact account readback.",
@@ -614,6 +638,9 @@ def holding_update_cmd(
         raise ValidationError(
             "Provide at least one of --quantity, --cost-basis, or --security-type."
         )
+    for field, value in (("quantity", quantity), ("cost-basis", cost_basis)):
+        if value is not None and not isfinite(value):
+            raise ValidationError("Provide a finite holding value.", field=field)
 
     changes: dict[str, Any] = {"id": holding_id}
     if quantity is not None:
@@ -625,16 +652,48 @@ def holding_update_cmd(
 
     with spinner("Updating manual holding..."):
         client = get_authenticated_client()
+        before = _find_holding_by_id(
+            run_api_call(_get_detailed_holdings_factory(client, account)),
+            holding_id,
+            exact_values=True,
+        )
+        if before is None:
+            raise APIError(
+                "Holding is absent from the selected account.",
+                details={"account_id": account, "holding_id": holding_id},
+            )
+        expected = {"quantity": quantity, "costBasis": cost_basis, "security_type": security_type}
+        if all(
+            value is None or (before.get(key) == value and not isinstance(before.get(key), bool))
+            for key, value in expected.items()
+        ):
+            output(
+                {
+                    "status": "unchanged",
+                    "entity": "holding",
+                    "id": holding_id,
+                    "account_id": account,
+                    "verified": True,
+                    "holding": before,
+                },
+                OutputFormat.JSON if json_output else format,
+            )
+            return
         data = run_api_call(
             lambda: _gql_call(
                 client,
                 "Common_UpdateHolding",
                 _UPDATE_HOLDING_MUTATION,
                 {"input": changes},
-            )
+            ),
+            max_retries=0,
         )
         _mutation_payload(data, "updateHolding")
-        holding = _read_exact_holding(client, account, holding_id)
+        holding = _find_holding_by_id(
+            run_api_call(_get_detailed_holdings_factory(client, account)),
+            holding_id,
+            exact_values=True,
+        )
         if holding is None:
             raise APIError(
                 "Updated holding was absent from exact account readback.",
@@ -680,13 +739,26 @@ def holding_delete_cmd(
 
     with spinner("Deleting manual holding..."):
         client = get_authenticated_client()
+        if _read_exact_holding(client, account, holding_id) is None:
+            output(
+                {
+                    "status": "unchanged",
+                    "entity": "holding",
+                    "id": holding_id,
+                    "verified": True,
+                    "message": "Already absent; no write needed.",
+                },
+                OutputFormat.JSON if json_output else format,
+            )
+            return
         data = run_api_call(
             lambda: _gql_call(
                 client,
                 "Common_DeleteHolding",
                 _DELETE_HOLDING_MUTATION,
                 {"id": holding_id},
-            )
+            ),
+            max_retries=0,
         )
         payload = _mutation_payload(data, "deleteHolding")
         if payload.get("deleted") is not True:

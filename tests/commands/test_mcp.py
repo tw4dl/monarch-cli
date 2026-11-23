@@ -12,7 +12,6 @@ runner = CliRunner()
 def test_mcp_start_check_exits() -> None:
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
-    assert "MCP dependency installed" in result.stderr
-    assert "MCP server constructable" in result.stderr
-    assert "monarch.run" in result.stderr
-    assert "monarch.auth_login" in result.stderr
+    assert "ready" in result.stdout
+    assert "monarch.run" in result.stdout
+    assert "monarch.auth_login" in result.stdout

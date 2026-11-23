@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import importlib.metadata
+from enum import Enum
 from typing import Annotated
 
 import typer
 
 from ..core.error_handler import handle_errors
-from ..output import console
+from ..core.exceptions import APIError
+from ..output import output
 
 app = typer.Typer(
     help="Run the Monarch MCP server",
@@ -27,14 +29,21 @@ _TOOL_NAMES: list[str] = [
 ]
 
 
+class Transport(str, Enum):
+    STDIO = "stdio"
+    HTTP = "streamable-http"
+    SSE = "sse"
+
+
 def _load_mcp_server() -> object:
     try:
         from monarch_cli.mcp_server import build_mcp_server  # noqa: PLC0415
     except ModuleNotFoundError as e:
         if e.name and e.name.startswith("mcp"):
-            console.print("[red]✗ MCP dependency not installed.[/red]")
-            console.print("Install with: [cyan]uv sync --extra mcp[/cyan]")
-            raise typer.Exit(1) from None
+            raise APIError(
+                "MCP support is not installed. Install monarch-cli with its mcp extra.",
+                details={"fix": "uv tool install --reinstall 'monarch-cli[mcp]'"},
+            ) from None
         raise
 
     return build_mcp_server()
@@ -46,17 +55,21 @@ def status_cmd() -> None:
     """Show MCP server status (dependency + constructability)."""
     try:
         mcp_version = importlib.metadata.version("mcp")
-        console.print(f"[green]✓[/green] MCP dependency installed ([dim]{mcp_version}[/dim])")
     except importlib.metadata.PackageNotFoundError:
-        console.print("[red]✗ MCP dependency not installed.[/red]")
-        console.print("Install with: [cyan]uv sync --extra mcp[/cyan]")
-        raise typer.Exit(1) from None
+        raise APIError(
+            "MCP support is not installed. Install monarch-cli with its mcp extra.",
+            details={"fix": "uv tool install --reinstall 'monarch-cli[mcp]'"},
+        ) from None
 
     server = _load_mcp_server()
-    console.print("[green]✓[/green] MCP server constructable")
-    console.print("[bold]Tools:[/bold] " + ", ".join(f"[cyan]{n}[/cyan]" for n in _TOOL_NAMES))
-    console.print()
-    console.print("Start with: [cyan]monarch mcp start[/cyan]")
+    output(
+        {
+            "status": "ready",
+            "version": mcp_version,
+            "tools": _TOOL_NAMES,
+            "help": ["monarch mcp start"],
+        }
+    )
 
     # Quiet mypy about `server` being unused in runtime paths
     _ = server
@@ -66,12 +79,12 @@ def status_cmd() -> None:
 @handle_errors
 def start(
     transport: Annotated[
-        str,
+        Transport,
         typer.Option(
             "--transport",
             help="Transport to use (stdio, streamable-http, sse). Default: stdio.",
         ),
-    ] = "stdio",
+    ] = Transport.STDIO,
 ) -> None:
     """Start the Monarch MCP server.
 
@@ -82,4 +95,4 @@ def start(
     server = _load_mcp_server()
 
     # FastMCP has a `.run(transport=...)` method; keep this command minimal.
-    server.run(transport=transport)  # type: ignore[attr-defined]
+    server.run(transport=transport.value)  # type: ignore[attr-defined]

@@ -25,8 +25,8 @@ if TYPE_CHECKING:
     from typing import Any
 
 # Valid format options
-FormatType = Literal["json", "table", "csv", "compact", "plain"]
-VALID_FORMATS: tuple[FormatType, ...] = ("json", "table", "csv", "compact", "plain")
+FormatType = Literal["json", "table", "csv", "compact", "plain", "toon"]
+VALID_FORMATS: tuple[FormatType, ...] = ("json", "table", "csv", "compact", "plain", "toon")
 
 # Default values
 DEFAULT_FORMAT: FormatType = "plain"

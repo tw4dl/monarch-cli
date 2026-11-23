@@ -4,6 +4,30 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core.exceptions import APIError
+from ..core.responses import complete_ids as complete_ids
+
+
+def already_absent(entity: str, **identity: Any) -> dict[str, Any]:
+    return mutation_result(
+        status="unchanged",
+        entity=entity,
+        verified=True,
+        message="Already absent; no write needed.",
+        **identity,
+    )
+
+
+def transaction_exists(raw: Any, transaction_id: str) -> bool:
+    if not isinstance(raw, dict) or raw.get("errors") or "getTransaction" not in raw:
+        raise APIError("Cannot verify absence: invalid transaction detail response")
+    row = raw["getTransaction"]
+    if row is None:
+        return False
+    if not isinstance(row, dict) or row.get("id") != transaction_id:
+        raise APIError("Transaction detail did not identify the requested transaction")
+    return True
+
 
 def mutation_result(
     *,

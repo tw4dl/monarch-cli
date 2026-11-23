@@ -1,20 +1,19 @@
-"""Authentication commands for Monarch CLI."""
+"""Flag-complete authentication and structured diagnostics; never prompt."""
 
 from __future__ import annotations
 
-import getpass
-from typing import Annotated
+import os
+from pathlib import Path
+from typing import Annotated, Any
 
 import keyring
 import typer
 from monarchmoney import MonarchMoney, RequireMFAException  # type: ignore[import-untyped]
 
 from ..core.adapter import extract_token_from_client, get_authenticated_client, reset_client
-from ..core.async_utils import run_api_call, run_async
-from ..core.config import get_config
+from ..core.async_utils import run_api_call
 from ..core.error_handler import handle_errors
-from ..core.exceptions import APIError, AuthenticationError
-from ..core.non_interactive import require_interactive
+from ..core.exceptions import APIError, AuthenticationError, ValidationError
 from ..core.session import (
     StorageBackend,
     delete_session_token,
@@ -22,208 +21,152 @@ from ..core.session import (
     get_storage_info,
     save_session_token,
 )
-from ..output import OutputFormat, console, output
+from ..output import OutputFormat, get_default_format, output
 
-app = typer.Typer(
-    help="Authentication management",
-    no_args_is_help=True,
-)
+app = typer.Typer(help="Authentication management", no_args_is_help=True)
+LOGIN_COMMAND = "monarch auth login --email EMAIL --password-file PASSWORD_FILE --storage file"
 
 
 def _wants_json(json_output: bool) -> bool:
-    return json_output or get_config().format == "json"
+    return json_output or get_default_format() == OutputFormat.JSON
 
 
 def _is_keyring_available() -> bool:
-    """Check if a real keyring backend is available.
-
-    The keyring library falls back to keyring.backends.fail.Keyring when
-    no working backend is found (e.g., headless Linux without Secret Service).
-    We detect this by checking the module name for "fail".
-
-    See: https://github.com/jaraco/keyring#api-interface
-    """
     try:
-        backend = keyring.get_keyring()
-        return "fail" not in type(backend).__module__
+        return "fail" not in type(keyring.get_keyring()).__module__
     except Exception:
         return False
 
 
 def _get_keyring_backend_name() -> str:
-    """Get the name of the current keyring backend."""
     try:
-        backend = keyring.get_keyring()
-        return type(backend).__name__
+        return type(keyring.get_keyring()).__name__
     except Exception:
         return "unknown"
 
 
-def _prompt_storage_backend() -> StorageBackend:
-    """Prompt user to choose a storage backend interactively."""
-    console.print()
-    console.print("[bold]Choose storage backend:[/bold]")
-
-    if _is_keyring_available():
-        console.print("  1. [green]keyring[/green] (recommended) - Secure OS credential storage")
-        console.print("  2. file - JSON file in config directory")
-        choice = typer.prompt("Enter choice", default="1")
-        if choice == "2":
-            return StorageBackend.FILE
-        return StorageBackend.KEYRING
-    else:
-        console.print("  [yellow]Keyring not available, using file storage[/yellow]")
-        return StorageBackend.FILE
+def _accounts_count(data: Any) -> int:
+    if not isinstance(data, dict) or not isinstance(data.get("accounts"), list):
+        raise APIError("Account response is missing its account list")
+    return len(data["accounts"])
 
 
 @app.command()
 @handle_errors
 def login(
-    storage: Annotated[
-        str | None,
+    email: Annotated[
+        str, typer.Option("--email", envvar="MONARCH_EMAIL", help="Monarch email address")
+    ],
+    password_file: Annotated[
+        Path | None,
         typer.Option(
-            "-s",
-            "--storage",
-            help="Storage backend: keyring or file (skips interactive prompt)",
+            "--password-file",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="UTF-8 password file; otherwise use MONARCH_PASSWORD",
         ),
     ] = None,
+    mfa_code: Annotated[
+        str | None,
+        typer.Option("--mfa-code", envvar="MONARCH_MFA_CODE", help="MFA code if required"),
+    ] = None,
+    storage: Annotated[
+        str, typer.Option("--storage", "-s", help="Session storage: keyring or file")
+    ] = "keyring",
 ) -> None:
-    """Log in to Monarch Money.
-
-    Prompts for email and password interactively. If MFA is enabled on your
-    account, you'll be prompted for a code from your authenticator app.
-
-    Note: This command uses interactive prompts and styled console output
-    rather than structured JSON errors, as it's designed for human use.
-    For programmatic auth status checking, use 'monarch auth status'.
+    """Log in using flags or environment variables, without interactive prompts.
 
     Examples:
-        monarch auth login              # Interactive login
-        monarch auth login -s file      # Use file storage
-        monarch auth login -s keyring   # Use keyring storage
+        monarch auth login --email EMAIL --password-file PASSWORD_FILE --storage file
+        monarch auth login --email EMAIL --password-file PASSWORD_FILE --mfa-code CODE
     """
-    console.print("[bold]Monarch Money Login[/bold]")
-    console.print()
-
-    # Get credentials
-    require_interactive("Email", fix="Use MONARCH_TOKEN or run `monarch auth login` in a TTY.")
-    email = typer.prompt("Email")
-    require_interactive("Password", fix="Use MONARCH_TOKEN or run `monarch auth login` in a TTY.")
-    password = getpass.getpass("Password: ")
-
-    # Determine storage backend
-    if storage:
-        storage_lower = storage.lower()
-        if storage_lower == "keyring":
-            if not _is_keyring_available():
-                console.print("[red]✗ Keyring not available. Use --storage=file instead.[/red]")
-                raise typer.Exit(1)
-            backend = StorageBackend.KEYRING
-        elif storage_lower == "file":
-            backend = StorageBackend.FILE
-        else:
-            console.print(f"[red]✗ Invalid storage backend: {storage}[/red]")
-            console.print("  Valid options: keyring, file")
-            raise typer.Exit(1)
-    else:
-        require_interactive("storage backend", fix="Pass `--storage keyring` or `--storage file`.")
-        backend = _prompt_storage_backend()
-
-    # Attempt login
-    console.print()
-    console.print("Authenticating...", style="dim")
-
-    mm = MonarchMoney()
+    if storage not in {"keyring", "file"}:
+        raise ValidationError("Invalid storage backend; use --storage keyring or --storage file")
+    if not email.strip():
+        raise ValidationError("--email must not be empty")
+    if storage == "keyring" and not _is_keyring_available():
+        raise ValidationError(
+            "Keyring not available; use --storage file", details={"fix": LOGIN_COMMAND}
+        )
     try:
-        run_async(mm.login(email, password, use_saved_session=False, save_session=False))
+        password = (
+            password_file.read_text().rstrip("\r\n")
+            if password_file
+            else os.environ.get("MONARCH_PASSWORD")
+        )
+    except (OSError, UnicodeError) as exc:
+        raise ValidationError("Cannot read --password-file as UTF-8") from exc
+    if not password:
+        raise ValidationError(
+            "Pass a nonempty --password-file or set MONARCH_PASSWORD",
+            details={"fix": LOGIN_COMMAND},
+        )
+    client = MonarchMoney()
+    client._headers["User-Agent"] = "OpenAI File Downloader, XaiImageApiFetch/1.0"
+    try:
+        run_api_call(
+            lambda: client.login(
+                email.strip(), password, use_saved_session=False, save_session=False
+            ),
+            max_retries=0,
+        )
     except RequireMFAException:
-        # MFA required - prompt for code
-        console.print()
-        console.print("[yellow]MFA required[/yellow]")
-        require_interactive("MFA Code", fix="Run `monarch auth login` in a TTY.")
-        mfa_code = typer.prompt("MFA Code")
+        if not mfa_code:
+            raise ValidationError(
+                "MFA required; rerun with --mfa-code CODE",
+                details={"fix": LOGIN_COMMAND + " --mfa-code CODE"},
+            ) from None
         try:
-            run_async(mm.multi_factor_authenticate(email, password, mfa_code))
-        except Exception as e:
-            console.print(f"[red]✗ MFA authentication failed: {e}[/red]")
-            raise typer.Exit(1) from None
-    except Exception as e:
-        console.print(f"[red]✗ Login failed: {e}[/red]")
-        raise typer.Exit(1) from None
-
-    # Extract and save token
-    token = extract_token_from_client(mm)
+            run_api_call(
+                lambda: client.multi_factor_authenticate(email.strip(), password, mfa_code),
+                max_retries=0,
+            )
+        except Exception as exc:
+            raise AuthenticationError(
+                "MFA login failed; check the code and rerun auth login",
+                details={"fix": LOGIN_COMMAND + " --mfa-code CODE"},
+            ) from exc
+    except Exception as exc:
+        raise AuthenticationError(
+            "Login failed; check your email and password, or reset your Monarch password",
+            details={"fix": LOGIN_COMMAND},
+        ) from exc
+    token = extract_token_from_client(client)
     if not token:
-        console.print("[red]✗ Failed to obtain authentication token[/red]")
-        raise typer.Exit(1)
-
-    save_session_token(token, backend)
-    reset_client()  # Clear cached client so it picks up new token
-
-    # Show success with account count
-    try:
-        client = get_authenticated_client()
-        accounts_data = run_api_call(lambda: client.get_accounts())
-        accounts = accounts_data.get("accounts", [])
-        account_count = len(accounts)
-
-        console.print()
-        console.print("[green]✓ Logged in successfully[/green]")
-        console.print(f"  Storage: {backend.value}")
-        console.print(f"  Accounts: {account_count}")
-    except Exception:
-        # Login succeeded but couldn't fetch accounts - still show success
-        console.print()
-        console.print("[green]✓ Logged in successfully[/green]")
-        console.print(f"  Storage: {backend.value}")
+        raise AuthenticationError("Login returned no session token", details={"fix": LOGIN_COMMAND})
+    save_session_token(token, StorageBackend(storage))
+    reset_client()
+    output({"status": "authenticated", "storage_backend": storage})
 
 
 @app.command()
 @handle_errors
 def status(
-    json_output: Annotated[
-        bool,
-        typer.Option(
-            "--json",
-            help="Output as JSON (for scripts and AI agents)",
-        ),
-    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
-    """Show current authentication status.
+    """Show stored credential availability; use auth ping to verify the session.
 
     Examples:
-        monarch auth status              # Human-readable output
-        monarch auth status --json       # JSON output for scripts
+        monarch auth status
+        monarch auth status --json
     """
-    storage_info = get_storage_info()
-    is_authenticated = storage_info["active_backend"] is not None
-
-    if _wants_json(json_output):
-        result = {
-            "authenticated": is_authenticated,
-            "storage_backend": storage_info["active_backend"],
-            "message": (
-                "Authenticated and ready"
-                if is_authenticated
-                else "Not authenticated. Run 'monarch auth login' to authenticate."
-            ),
-        }
-        output(result, OutputFormat.JSON)
-    else:
-        # Human-readable output
-        if is_authenticated:
-            console.print("[green]✓ Authenticated[/green]")
-            backend = storage_info["active_backend"]
-            if backend == "file":
-                console.print(f"  Backend: {backend} ({get_session_path()})")
-            elif backend == "env":
-                console.print(f"  Backend: {backend} (MONARCH_TOKEN)")
-            else:
-                console.print(f"  Backend: {backend}")
-        else:
-            console.print("[yellow]✗ Not authenticated[/yellow]")
-            console.print()
-            console.print("Run [cyan]monarch auth login[/cyan] to authenticate.")
+    info = get_storage_info()
+    authenticated = info["active_backend"] is not None
+    result: dict[str, Any] = {
+        "authenticated": authenticated,
+        "storage_backend": info["active_backend"],
+        "message": "Authenticated and ready"
+        if authenticated
+        else "Not authenticated. Run 'monarch auth login' to authenticate.",
+    }
+    if not _wants_json(json_output):
+        if info["active_backend"] == "file":
+            result["location"] = str(get_session_path())
+        elif info["active_backend"] == "env":
+            result["location"] = "MONARCH_TOKEN"
+        result["help"] = ["monarch auth ping --json" if authenticated else LOGIN_COMMAND]
+    output(result, OutputFormat.JSON if _wants_json(json_output) else None)
 
 
 @app.command()
@@ -231,241 +174,112 @@ def status(
 def logout(
     storage: Annotated[
         str | None,
-        typer.Option(
-            "-s",
-            "--storage",
-            help="Clear specific backend only: keyring, file, or file-compat",
-        ),
+        typer.Option("--storage", "-s", help="Clear keyring, file, or file-compat; default all"),
     ] = None,
 ) -> None:
-    """Log out and clear stored credentials.
-
-    By default, clears tokens from all storage backends.
-    Use --storage to clear a specific backend only.
+    """Clear saved credentials; an already empty store is a successful no-op.
 
     Examples:
-        monarch auth logout              # Clear all tokens
-        monarch auth logout -s keyring   # Clear keyring only
-        monarch auth logout -s file      # Clear file only
+        monarch auth logout
+        monarch auth logout --storage file
     """
-    if storage:
-        storage_lower = storage.lower()
-        try:
-            backend = StorageBackend(storage_lower)
-        except ValueError:
-            console.print(f"[red]✗ Invalid storage backend: {storage}[/red]")
-            console.print("  Valid options: keyring, file, file-compat")
-            raise typer.Exit(1) from None
-
-        delete_session_token(backend)
-        console.print(f"[green]✓ Cleared {backend.value} storage[/green]")
-    else:
-        delete_session_token(None)  # Clear all
-        console.print("[green]✓ Logged out from all storage backends[/green]")
-
+    try:
+        backend = StorageBackend(storage.lower()) if storage else None
+    except ValueError as exc:
+        raise ValidationError("Invalid storage backend; use keyring, file, or file-compat") from exc
+    if backend is None and os.environ.get("MONARCH_TOKEN"):
+        raise ValidationError(
+            "MONARCH_TOKEN is set; unset it before logging out",
+            details={"fix": "unset MONARCH_TOKEN"},
+        )
+    delete_session_token(backend)
     reset_client()
+    output({"status": "logged_out", "storage_backend": backend.value if backend else "all"})
 
 
 @app.command()
 @handle_errors
 def doctor() -> None:
-    """Diagnose authentication setup.
-
-    Checks keyring availability, shows status of all token storage
-    locations, and tests API connectivity if authenticated.
+    """Diagnose storage and live connectivity without exposing credentials.
 
     Examples:
         monarch auth doctor
+        monarch auth doctor --format json
     """
-    console.print("[bold]Monarch CLI Auth Diagnostics[/bold]")
-    console.print()
-
-    # Keyring check
-    console.print("[bold]Keyring:[/bold]")
-    keyring_available = _is_keyring_available()
-    keyring_backend = _get_keyring_backend_name()
-    if keyring_available:
-        console.print(f"  [green]✓ Available[/green] (backend: {keyring_backend})")
-    else:
-        console.print(f"  [yellow]✗ Not available[/yellow] (backend: {keyring_backend})")
-    console.print()
-
-    # Storage status
-    console.print("[bold]Token Storage:[/bold]")
-    storage_info = get_storage_info()
-
-    if storage_info["has_env_token"]:
-        console.print("  [green]✓ MONARCH_TOKEN[/green] env var set")
-    else:
-        console.print("  [dim]✗ MONARCH_TOKEN[/dim] env var not set")
-
-    if storage_info["has_keyring_token"]:
-        console.print("  [green]✓ Keyring[/green] token stored")
-    else:
-        console.print("  [dim]✗ Keyring[/dim] no token")
-
-    if storage_info["has_file_token"]:
-        console.print(f"  [green]✓ File[/green] token at {get_session_path()}")
-    else:
-        console.print(f"  [dim]✗ File[/dim] no token at {get_session_path()}")
-
-    if storage_info["has_compat_token"]:
-        console.print("  [green]✓ Compat[/green] legacy mm_session.pickle found")
-    else:
-        console.print("  [dim]✗ Compat[/dim] no legacy session")
-
-    console.print()
-    console.print("[bold]Active Backend:[/bold]")
-    if storage_info["active_backend"]:
-        console.print(f"  [green]{storage_info['active_backend']}[/green]")
-    else:
-        console.print("  [yellow]None - not authenticated[/yellow]")
-
-    # API test if authenticated
-    console.print()
-    console.print("[bold]API Connectivity:[/bold]")
-    if storage_info["active_backend"]:
+    info = get_storage_info()
+    connection: dict[str, Any] = {"status": "skipped", "message": "Not authenticated"}
+    if info["active_backend"]:
         try:
             client = get_authenticated_client()
-            accounts_data = run_api_call(lambda: client.get_accounts())
-            accounts = accounts_data.get("accounts", [])
-            console.print(f"  [green]✓ Connected[/green] ({len(accounts)} accounts)")
+            count = _accounts_count(run_api_call(lambda: client.get_accounts()))
+            connection = {"status": "ok", "account_count": count}
         except AuthenticationError:
-            console.print("  [yellow]✗ Not authenticated[/yellow]")
-        except Exception as e:
-            console.print(f"  [red]✗ API error: {e}[/red]")
-    else:
-        console.print("  [dim]Skipped - not authenticated[/dim]")
+            connection = {"status": "auth_required", "help": LOGIN_COMMAND}
+        except Exception:
+            connection = {"status": "error", "help": "monarch auth ping --json"}
+    output(
+        {
+            "keyring": {
+                "available": _is_keyring_available(),
+                "backend": _get_keyring_backend_name(),
+            },
+            "storage": info,
+            "session_file": str(get_session_path()),
+            "connection": connection,
+        }
+    )
 
 
 @app.command()
 @handle_errors
 def ping(
-    json_output: Annotated[
-        bool,
-        typer.Option(
-            "--json",
-            help="Output as JSON (for scripts and AI agents)",
-        ),
-    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
-    """Test API connectivity.
-
-    Makes a simple API call to verify authentication is working.
-    Requires being logged in first.
+    """Verify the stored session through a live read-only request.
 
     Examples:
-        monarch auth ping                # Human-readable output
-        monarch auth ping --json         # JSON output for scripts
+        monarch auth ping
+        monarch auth ping --json
     """
     client = get_authenticated_client()
-
     try:
-        accounts_data = run_api_call(lambda: client.get_accounts())
-        accounts = accounts_data.get("accounts", [])
-        account_count = len(accounts)
-
-        if _wants_json(json_output):
-            result = {
-                "status": "ok",
-                "message": f"Connected successfully. {account_count} accounts available.",
-            }
-            output(result, OutputFormat.JSON)
-        else:
-            # Human-readable output
-            console.print("[green]✓ Connected[/green]")
-            console.print(f"  Accounts: {account_count}")
-    except Exception as e:
-        raise APIError(f"API request failed: {e}") from e
+        count = _accounts_count(run_api_call(lambda: client.get_accounts()))
+    except AuthenticationError:
+        raise
+    except Exception as exc:
+        raise APIError(
+            "Connection check failed; verify your network and session with auth doctor"
+        ) from exc
+    result: dict[str, Any] = {
+        "status": "ok",
+        "message": f"Connected successfully. {count} accounts available.",
+    }
+    if not _wants_json(json_output):
+        result["account_count"] = count
+    output(result, OutputFormat.JSON if _wants_json(json_output) else None)
 
 
 @app.command()
 def setup() -> None:
-    """Show setup instructions.
-
-    Displays detailed instructions for setting up authentication,
-    including storage options, security considerations, and troubleshooting tips.
+    """Show complete login and diagnostic commands without opening a browser.
 
     Examples:
         monarch auth setup
+        monarch auth setup --format json
     """
-    console.print("[bold]Monarch CLI Setup Instructions[/bold]")
-    console.print()
-
-    console.print("[bold]Quick Start:[/bold]")
-    console.print("  1. Run: [cyan]monarch auth login[/cyan]")
-    console.print("  2. Enter your Monarch Money email and password")
-    console.print("  3. If prompted, enter your MFA code")
-    console.print("  4. Choose a storage backend")
-    console.print()
-
-    console.print("[bold]Storage Options:[/bold]")
-    console.print()
-    console.print("  [green]keyring[/green] (recommended)")
-    console.print("    Uses your OS secure credential storage (macOS Keychain,")
-    console.print("    Windows Credential Manager, Linux Secret Service)")
-    console.print()
-    console.print("  [yellow]file[/yellow]")
-    console.print(f"    Stores token in: {get_session_path()}")
-    console.print("    File has 0600 permissions (owner read/write only)")
-    console.print()
-    console.print("  [dim]MONARCH_TOKEN[/dim] (environment variable)")
-    console.print("    Set this env var to skip storage entirely")
-    console.print("    Useful for CI/CD or containerized environments")
-    console.print()
-
-    console.print("[bold]Security Considerations:[/bold]")
-    console.print()
-    console.print("  [green]🔒 Keyring (Most Secure)[/green]")
-    console.print("    • Token encrypted by OS-level security (Keychain, DPAPI, libsecret)")
-    console.print("    • Protected by your user account/login password")
-    console.print("    • Not accessible to other users or processes without privileges")
-    console.print("    • Best for: Personal workstations, developer machines")
-    console.print()
-    console.print("  [yellow]📁 File Storage (Moderate Security)[/yellow]")
-    console.print("    • Token stored in plaintext JSON file")
-    console.print("    • Protected by filesystem permissions (0600)")
-    console.print("    • Accessible to root/admin and your user account")
-    console.print("    • Best for: Headless servers, VMs where keyring unavailable")
-    console.print()
-    console.print("  [red]⚠️  MONARCH_TOKEN Environment Variable (Use with Caution)[/red]")
-    console.print("    Environment variables have inherent security risks:")
-    console.print("    • Visible in process listings (ps aux, /proc/*/environ)")
-    console.print("    • May be logged by shells, process managers, or monitoring tools")
-    console.print("    • Inherited by child processes (risk of leaking to subprocesses)")
-    console.print("    • Can appear in crash dumps or debug logs")
-    console.print()
-    console.print("    [bold]Only use MONARCH_TOKEN when:[/bold]")
-    console.print("    • Running in CI/CD with proper secret injection")
-    console.print("    • Running in containers with secrets management")
-    console.print("    • You understand and accept the risks")
-    console.print()
-
-    console.print("[bold]CI/CD Secret Injection (Recommended):[/bold]")
-    console.print()
-    console.print("  [cyan]GitHub Actions:[/cyan]")
-    console.print("    1. Add MONARCH_TOKEN to repository secrets")
-    console.print("    2. Reference in workflow:")
-    console.print("       env:")
-    console.print("         MONARCH_TOKEN: ${{ secrets.MONARCH_TOKEN }}")
-    console.print()
-    console.print("  [cyan]GitLab CI:[/cyan]")
-    console.print("    1. Add MONARCH_TOKEN as CI/CD variable (masked, protected)")
-    console.print("    2. Variable is automatically available in jobs")
-    console.print()
-    console.print("  [cyan]Docker / Containers:[/cyan]")
-    console.print("    Avoid baking tokens into images. Instead:")
-    console.print("    • Pass at runtime: docker run -e MONARCH_TOKEN=... image")
-    console.print("    • Use secrets managers (Docker Secrets, Vault, AWS SSM)")
-    console.print("    • Mount secrets as files: docker run -v /secrets:/secrets image")
-    console.print()
-
-    console.print("[bold]Troubleshooting:[/bold]")
-    console.print("  • Run [cyan]monarch auth doctor[/cyan] to diagnose issues")
-    console.print("  • Run [cyan]monarch auth status[/cyan] to check auth state")
-    console.print("  • Run [cyan]monarch auth logout[/cyan] to start fresh")
-    console.print()
-
-    console.print("[bold]More Help:[/bold]")
-    console.print("  • GitHub: https://github.com/monarch-money/monarch-cli")
-    console.print("  • Monarch: https://www.monarchmoney.com")
+    output(
+        {
+            "login": LOGIN_COMMAND,
+            "mfa": LOGIN_COMMAND + " --mfa-code CODE",
+            "storage": {
+                "keyring": "OS credential storage",
+                "file": str(get_session_path()),
+                "env": "MONARCH_TOKEN",
+            },
+            "help": [
+                "monarch auth status --json",
+                "monarch auth doctor",
+                "monarch auth ping --json",
+            ],
+        }
+    )

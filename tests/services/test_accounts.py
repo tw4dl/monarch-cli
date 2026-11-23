@@ -6,6 +6,9 @@ Use mocks to verify logic without executing actual refresh requests.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from monarch_cli.core.exceptions import APIError
 from monarch_cli.services.accounts import (
     get_account_ids,
     list_accounts,
@@ -108,8 +111,8 @@ class TestGetAccountIds:
 
     @patch("monarch_cli.services.accounts.get_authenticated_client")
     @patch("monarch_cli.services.accounts.run_api_call")
-    def test_filters_none_ids(self, mock_run_async, _mock_get_client):
-        """Should not include accounts with None IDs."""
+    def test_rejects_missing_ids(self, mock_run_async, _mock_get_client):
+        """Do not silently refresh a partial scope when account IDs are missing."""
         mock_run_async.return_value = {
             "accounts": [
                 {"id": "acc-123", "displayName": "Valid"},
@@ -117,9 +120,8 @@ class TestGetAccountIds:
             ]
         }
 
-        result = get_account_ids()
-
-        assert result == ["acc-123"]
+        with pytest.raises(APIError, match="record IDs"):
+            get_account_ids()
 
 
 class TestRefreshAccounts:

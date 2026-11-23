@@ -37,7 +37,6 @@ def test_capabilities_json_manifest_is_deterministic() -> None:
         "0": "success",
         "1": "general error",
         "2": "usage error",
-        "4": "input needed",
     }
     assert "MONARCH_TOKEN" in {env["name"] for env in data["env_vars"]}
     assert "config.toml" in {config["path"] for config in data["config_files"]}
@@ -67,8 +66,10 @@ def test_capabilities_json_manifest_is_deterministic() -> None:
     assert holding_create["mutates"] is True
 
 
-def test_capabilities_plain_points_to_json() -> None:
+def test_capabilities_default_has_structured_content() -> None:
     result = runner.invoke(app, ["capabilities"])
 
     assert result.exit_code == 0
-    assert "Run `monarch capabilities --json`" in result.stderr
+    assert "commands[" in result.stdout
+    assert "exit_codes:" in result.stdout
+    assert result.stderr == ""

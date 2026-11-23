@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -261,7 +261,16 @@ class TestCategoryMutations:
 
         async def async_create(**kwargs):
             captured.update(kwargs)
-            return {"id": "cat_new"}
+            return {
+                "createCategory": {
+                    "errors": [],
+                    "category": {
+                        "id": "cat_new",
+                        "name": kwargs["transaction_category_name"],
+                        "group": {"id": kwargs["group_id"]},
+                    },
+                }
+            }
 
         mock_authenticated_client.create_transaction_category = async_create
 
@@ -309,6 +318,9 @@ class TestCategoryMutations:
             return [True, True]
 
         mock_authenticated_client.delete_transaction_categories = async_delete_many
+        mock_authenticated_client.get_transaction_categories = AsyncMock(
+            return_value={"categories": [{"id": "cat_1"}, {"id": "cat_2"}]}
+        )
 
         with (
             patch(

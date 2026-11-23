@@ -199,7 +199,9 @@ def summary(
 @app.command("detail")
 @handle_errors
 def detail(
-    limit: Annotated[int, typer.Option("-l", "--limit", help="Maximum rows to return")] = 100,
+    limit: Annotated[
+        int, typer.Option("-l", "--limit", min=1, help="Maximum rows to return")
+    ] = 100,
     start: Annotated[str | None, typer.Option("-s", "--start", help="Start date")] = None,
     end: Annotated[str | None, typer.Option("-e", "--end", help="End date")] = None,
     preset: Annotated[

@@ -1,5 +1,7 @@
 """Monarch CLI entry point."""
 
+from typing import cast
+
 import typer
 from typer.main import get_command
 
@@ -15,17 +17,25 @@ from monarch_cli.commands import (
     mcp,
     receipts,
     report,
+    result,
     transactions,
 )
+from monarch_cli.commands.agent_hooks import session_hook
+from monarch_cli.core.agent_cli import AgentGroup
+from monarch_cli.core.agent_context import options as agent_options
 from monarch_cli.core.capabilities import build_capabilities
-from monarch_cli.core.config import Config, set_config
-from monarch_cli.output import OutputFormat, apply_config, console, output
+from monarch_cli.core.config import Config, FormatType, set_config
+from monarch_cli.core.dashboard import dashboard
+from monarch_cli.core.error_handler import handle_errors
+from monarch_cli.output import OutputFormat, apply_config, output
 
 app = typer.Typer(
     name="monarch",
+    cls=AgentGroup,
     help="CLI for Monarch Money",
-    no_args_is_help=True,
-    epilog="Exit codes: 0 success; 1 general error; 2 usage error; 4 input needed.",
+    no_args_is_help=False,
+    invoke_without_command=True,
+    epilog="Exit codes: 0 success; 1 general error; 2 usage or input error.",
 )
 
 # Register command groups
@@ -40,6 +50,8 @@ app.add_typer(investments.app, name="investments")
 app.add_typer(mcp.app, name="mcp")
 app.add_typer(receipts.app, name="receipts")
 app.add_typer(report.app, name="report")
+app.add_typer(result.app, name="result")
+app.command("_session-hook", hidden=True)(session_hook)
 
 
 def version_callback(value: bool) -> None:
@@ -50,7 +62,9 @@ def version_callback(value: bool) -> None:
 
 
 @app.callback()
+@handle_errors
 def main(
+    ctx: typer.Context,
     version: bool | None = typer.Option(  # noqa: ARG001
         None,
         "--version",
@@ -73,7 +87,7 @@ def main(
     json_output: bool = typer.Option(
         False,
         "--json",
-        help="Output in JSON format (overrides TTY detection).",
+        help="Output the complete JSON schema.",
     ),
     quiet: bool = typer.Option(
         False,
@@ -101,11 +115,15 @@ def main(
     # Load config from file and env vars
     config = Config.load()
 
+    if config.get_source("format") == "default":
+        config = config.with_overrides(format="toon")
+    requested_format = cast(FormatType | None, agent_options().get("format"))
+
     # Apply CLI flag overrides
     config = config.with_overrides(
         verbose=verbose if verbose else None,
         debug=debug if debug else None,
-        format="json" if json_output else None,
+        format="json" if json_output else requested_format,
         quiet=quiet if quiet else None,
         color=False if no_color else None,
         timeout_seconds=timeout,
@@ -117,6 +135,8 @@ def main(
 
     # Apply config to output system
     apply_config(config)
+    if ctx.invoked_subcommand is None:
+        output(dashboard())
 
 
 @app.command()
@@ -132,7 +152,7 @@ def capabilities(
     if json_output:
         output(manifest, OutputFormat.JSON)
     else:
-        console.print("Run `monarch capabilities --json` for the machine-readable manifest.")
+        output(manifest)
 
 
 if __name__ == "__main__":

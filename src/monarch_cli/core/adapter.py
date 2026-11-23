@@ -9,6 +9,9 @@ from __future__ import annotations
 from typing import cast
 
 from monarchmoney import MonarchMoney  # type: ignore[import-untyped]
+from monarchmoney.monarchmoney import (  # type: ignore[import-untyped]
+    BalanceHistoryRow as BalanceHistoryRow,
+)
 
 from .exceptions import AuthenticationError
 from .session import get_session_token
